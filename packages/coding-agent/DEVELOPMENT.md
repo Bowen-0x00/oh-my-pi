@@ -49,6 +49,54 @@ must clear and restore `PI_CODING_AGENT_DIR` so inherited overrides cannot bypas
 the fixture. Reuse `restoreEnvValue()` from `test/helpers/settings-test-state.ts`
 to preserve unset values.
 
+## Maintaining the quota-routing fork
+
+`Bowen-0x00/oh-my-pi` keeps the local quota fixes on `quota-routing`. `origin`
+points to that fork; `upstream` points to `can1357/oh-my-pi`. Keep fixes as
+ordinary commits and merge upstream history rather than replaying binary patches.
+
+From the repository root on Linux, with Bun >=1.4.4 on `PATH`:
+
+```bash
+git switch quota-routing
+bun run fork:update
+git push origin quota-routing
+```
+
+`fork:update` requires a clean branch, fetches and merges `upstream/main`, installs
+locked build dependencies, downloads the exact version of the published native
+addon, regenerates catalog rules, runs the quota/auth regression tests and AI/catalog
+type checks, builds the standalone executable, and smoke-tests its workers before
+atomically installing it at `~/.local/bin/omp`. It never pushes or stores GitHub
+credentials. Existing HTTPS/HTTP proxy environment variables and Git authentication
+are used normally; when those proxy variables are unset, a configured Git `http.proxy`
+also supplies the proxy for Bun downloads.
+
+If only the generated `packages/catalog/src/compat/rules.json` conflicts, the helper
+regenerates it and finishes the merge after checks pass. Other source conflicts stop
+before installation: resolve them, commit the merge, and run `bun run fork:build`.
+Dirty files are never stashed, reset, or discarded automatically.
+
+To perform the Git steps yourself or build without installing:
+
+```bash
+git pull --no-rebase upstream main
+bun run fork:build
+# Or: bun run fork:build --build-only
+# Or: bun run fork:build --install-dir /another/bin
+```
+
+If the exact native addon has not been published for an upstream version, the helper
+stops rather than embedding an old addon. Use a published upstream release or follow
+the native source-build instructions. A dependency, test, typecheck, build, or smoke
+failure leaves the installed executable unchanged. Source merge commits are not
+automatically rolled back.
+
+Successful installs retain the previous executable and source commit under
+`${XDG_STATE_HOME:-~/.local/state}/omp/fork-builds/`. Running omp sessions are not
+restarted; exit and resume them to load the new executable. Do not use `omp update`
+to maintain this fork: that installs an official binary and discards local changes.
+
 ## Boot flow
 
 ```text
