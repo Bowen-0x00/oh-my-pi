@@ -55,6 +55,11 @@ to preserve unset values.
 points to that fork; `upstream` points to `can1357/oh-my-pi`. Keep fixes as
 ordinary commits and merge upstream history rather than replaying binary patches.
 
+For a complete AI-agent task brief, use the repository-root
+[`UPDATE_PROMPT.md`](../../UPDATE_PROMPT.md). It includes the local paths, latest-main
+update target, quota behavior contracts, conflict handling, verification,
+installation, rollback, and credential-safety requirements.
+
 From the repository root on Linux, with Bun >=1.4.4 on `PATH`:
 
 ```bash
