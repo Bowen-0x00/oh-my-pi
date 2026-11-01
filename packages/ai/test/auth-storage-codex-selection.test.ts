@@ -911,6 +911,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {
 			rankingStrategyResolver: () => undefined,
+			usageProviderResolver: () => undefined,
 			accountPolicies: [
 				{ provider: "openai-codex", account: { accountId: "acct-preferred" }, priority: 10 },
 				{ provider: "openai-codex", account: { accountId: "acct-other" }, priority: 1 },
