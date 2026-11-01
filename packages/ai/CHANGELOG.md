@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Google Antigravity account selection and cooldowns to use Gemini 4 Argon's own quota, prefer measured Argon headroom, and skip accounts whose roster explicitly disables Argon.
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes

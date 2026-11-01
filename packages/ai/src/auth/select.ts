@@ -352,7 +352,7 @@ export class CredentialSelector {
 		provider: string,
 		credentials: readonly OAuthSelection[],
 		strategy: CredentialRankingStrategy | undefined,
-		hasPlanRequirement: boolean,
+		requiresModelUsage: boolean,
 	): { policyReserveEnabled: boolean; checkUsage: boolean } {
 		const hasAccountPolicy = credentials.some(
 			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
@@ -361,7 +361,7 @@ export class CredentialSelector {
 		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
 		return {
 			policyReserveEnabled,
-			checkUsage: (strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement),
+			checkUsage: (strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || requiresModelUsage),
 		};
 	}
 
@@ -414,7 +414,15 @@ export class CredentialSelector {
 		const strategy = this.#deps.strategies(provider);
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const planGate = strategy?.planGate?.(rankingContext);
-		if (!this.#oauthUsagePolicy(provider, credentials, strategy, planGate !== undefined).checkUsage) return;
+		if (
+			!this.#oauthUsagePolicy(
+				provider,
+				credentials,
+				strategy,
+				planGate !== undefined || strategy?.modelAvailability?.(rankingContext) !== undefined,
+			).checkUsage
+		)
+			return;
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const providerKey = providerTypeKey(provider, "oauth");
@@ -623,7 +631,7 @@ export class CredentialSelector {
 			provider,
 			credentials,
 			strategy,
-			hasPlanRequirement,
+			hasPlanRequirement || strategy?.modelAvailability?.(rankingContext) !== undefined,
 		);
 		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
@@ -1098,10 +1106,11 @@ export class CredentialSelector {
 		const planGate = providedPlanGate ?? this.#deps.strategies(provider)?.planGate?.({ modelId: options?.modelId });
 		const hasPlanRequirement = planGate !== undefined;
 		const applyPlanFilter = enforcePlanRequirement ?? hasPlanRequirement;
+		const modelAvailability = strategy?.modelAvailability?.({ modelId: options?.modelId });
 		let usage: UsageReport | null = null;
 		let usageChecked = false;
 
-		if ((checkUsage && !allowBlocked) || hasPlanRequirement) {
+		if ((checkUsage && !allowBlocked) || hasPlanRequirement || modelAvailability !== undefined) {
 			if (usagePrechecked) {
 				usage = prefetchedUsage;
 				usageChecked = true;
@@ -1112,6 +1121,7 @@ export class CredentialSelector {
 				});
 				usageChecked = true;
 			}
+			if (modelAvailability?.(usage) === false) return undefined;
 			if (applyPlanFilter && planGate?.(usage) !== true) {
 				return undefined;
 			}
@@ -1172,7 +1182,7 @@ export class CredentialSelector {
 				const rowId = this.#deps.pool.entries(provider)[selection.index]?.id;
 				if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
 			}
-			if ((checkUsage && !allowBlocked) || hasPlanRequirement) {
+			if ((checkUsage && !allowBlocked) || hasPlanRequirement || modelAvailability !== undefined) {
 				const sameAccount = selection.credential.accountId === updated.accountId;
 				if (!usageChecked || !sameAccount) {
 					usage = await this.#deps.usage.report(provider, updated, {
@@ -1181,6 +1191,7 @@ export class CredentialSelector {
 					});
 					usageChecked = true;
 				}
+				if (modelAvailability?.(usage) === false) return undefined;
 				if (applyPlanFilter && planGate?.(usage) !== true) {
 					return undefined;
 				}

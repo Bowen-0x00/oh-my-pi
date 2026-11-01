@@ -454,6 +454,13 @@ export interface CredentialRankingStrategy {
 	 * `undefined` when every plan may serve the model.
 	 */
 	planGate?(context: CredentialRankingContext): PlanGate | undefined;
+	/**
+	 * Authoritative per-account model availability from the provider's roster.
+	 * False excludes the credential even in last-resort passes; undefined keeps
+	 * legacy/unknown access usable. Unlike a plan gate, this does not force
+	 * healthy warm sessions to rank or probe sibling accounts on every request.
+	 */
+	modelAvailability?(context: CredentialRankingContext): PlanGate | undefined;
 	/** Idle window after which a session pin stops suppressing usage re-ranking because the provider's prompt cache cannot still be warm; omit for indefinite stickiness. */
 	stickyWarmMs?: number;
 	/** Extract the primary (short) and secondary (long) window limits from a usage report. */

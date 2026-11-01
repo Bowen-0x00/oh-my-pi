@@ -126,6 +126,8 @@ export class CredentialHealth implements HealthApi {
 			modelId: options.modelId,
 		};
 		const planGate = strategy?.planGate?.(rankingContext);
+		const modelAvailability = strategy?.modelAvailability?.(rankingContext);
+		const unavailableCredentials = new Set<number>();
 		const planEligibilityByCredential = new Map<number, boolean | undefined>();
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
@@ -177,6 +179,7 @@ export class CredentialHealth implements HealthApi {
 				if (planGate) {
 					planEligibilityByCredential.set(entry.id, planGate(report));
 				}
+				if (modelAvailability?.(report) === false) unavailableCredentials.add(entry.id);
 
 				if (this.#deps.blocks.supportsHealing(provider)) {
 					blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, index, blockScopes);
@@ -231,6 +234,9 @@ export class CredentialHealth implements HealthApi {
 		);
 		if (planGate) {
 			accounts = accounts.filter(account => planEligibilityByCredential.get(account.credentialId) !== false);
+		}
+		if (unavailableCredentials.size > 0) {
+			accounts = accounts.filter(account => !unavailableCredentials.has(account.credentialId));
 		}
 		if (selectedCredentialId !== undefined) {
 			const selectedAccount = accounts.find(account => account.credentialId === selectedCredentialId);

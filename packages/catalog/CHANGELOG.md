@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Google Antigravity quota routing to distinguish Gemini 4 Argon and its thinking variants from the ordinary Gemini meter.
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes

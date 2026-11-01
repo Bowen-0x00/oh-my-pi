@@ -29,6 +29,8 @@ interface AntigravityQuotaInfo {
 
 interface AntigravityModelInfo {
 	displayName?: string;
+	disabled?: boolean;
+	isInternal?: boolean;
 	quotaInfo?: AntigravityQuotaInfo | AntigravityQuotaInfo[];
 	quotaInfos?: AntigravityQuotaInfo[];
 	dailyQuotaInfo?: AntigravityQuotaInfo | AntigravityQuotaInfo[];
@@ -288,6 +290,11 @@ function getQuotaSummaryCounterKeys(
 ): string[] {
 	const bucketId = bucket.bucketId?.toLowerCase() ?? "";
 	const groupName = group?.displayName?.toLowerCase() ?? "";
+	// Argon has its own weekly meter. Keep it separate from the ordinary
+	// Gemini bucket so an Argon exhaustion cannot block Gemini (or vice versa).
+	if (bucketId.startsWith("gemini-argon-") || groupName.includes("gemini 4 argon")) {
+		return ["google-argon"];
+	}
 	if (bucketId.startsWith("gemini-") || groupName.includes("gemini")) return ["google"];
 	if (
 		bucketId.startsWith("3p-") ||
@@ -307,6 +314,8 @@ function getQuotaSummaryCounterName(counterKey: string): string | undefined {
 	switch (counterKey) {
 		case "google":
 			return "Google";
+		case "google-argon":
+			return "Gemini (Argon)";
 		case "anthropic":
 			return "Anthropic";
 		case "openai":
@@ -363,7 +372,7 @@ function buildQuotaSummaryReport(
 		// so the `bucketId` is the only signal that a Google-counter bucket
 		// tracks its own model family; Argon's weekly-only quota is separate
 		// from the shared Gemini weekly bucket and must stay distinguishable.
-		const bucketLabel = bucket.bucketId?.toLowerCase().startsWith("gemini-argon-") ? "Gemini (Argon)" : undefined;
+		const bucketLabel = counterKeys.includes("google-argon") ? "Gemini (Argon)" : undefined;
 		for (const counterKey of counterKeys) {
 			const counterName = getQuotaSummaryCounterName(counterKey);
 			const windowId = window?.id ?? bucket.window ?? bucket.bucketId ?? "default";
@@ -494,26 +503,59 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 		{ ...endpointRequest, path: RETRIEVE_USER_QUOTA_SUMMARY_PATH },
 		ctx,
 	);
+	let summaryReport: UsageReport | null = null;
 	if (summaryResult.response?.ok) {
 		const summaryData = (await summaryResult.response.json()) as AntigravityQuotaSummaryResponse;
-		const summaryReport = buildQuotaSummaryReport(summaryData, params, summaryResult.endpoint, nowMs);
-		if (summaryReport) return summaryReport;
+		summaryReport = buildQuotaSummaryReport(summaryData, params, summaryResult.endpoint, nowMs);
+		if (summaryReport && getAntigravityCounterLimits(summaryReport, "google-argon").length > 0) {
+			return summaryReport;
+		}
 	}
 
-	// Older Cloud Code Assist deployments and compatible proxies may not expose
-	// retrieveUserQuotaSummary. Preserve the model-level quota parser as a
-	// fallback rather than dropping usage reporting for those endpoints.
-	const legacyResult = await fetchAntigravityEndpoint({ ...endpointRequest, path: FETCH_AVAILABLE_MODELS_PATH }, ctx);
+	// Legacy deployments need the model-level parser. A summary without an
+	// Argon bucket can also be an Ultra account (shared Gemini quota) or an
+	// unavailable Argon roster: only the roster's explicit evidence can tell.
+	// Accounts already reporting an Argon meter never incur this extra probe.
+	let legacyResult: AntigravityEndpointResult;
+	try {
+		legacyResult = await fetchAntigravityEndpoint({ ...endpointRequest, path: FETCH_AVAILABLE_MODELS_PATH }, ctx);
+	} catch (error) {
+		if (summaryReport) return summaryReport;
+		throw error;
+	}
 	if (!legacyResult.response?.ok) {
+		if (summaryReport) return summaryReport;
 		ctx.logger?.warn("Antigravity usage fetch failed", {
 			status: legacyResult.response?.status ?? summaryResult.response?.status ?? 0,
 			statusText: legacyResult.response?.statusText ?? summaryResult.response?.statusText ?? "unknown",
 		});
 		return null;
 	}
-	const data = (await legacyResult.response.json()) as AntigravityUsageResponse;
+	let data: AntigravityUsageResponse;
+	try {
+		data = (await legacyResult.response.json()) as AntigravityUsageResponse;
+	} catch (error) {
+		if (summaryReport) return summaryReport;
+		throw error;
+	}
 	const successfulEndpoint = legacyResult.endpoint;
 
+	const legacyReport = buildLegacyUsageReport(data, params, successfulEndpoint, nowMs);
+	if (!summaryReport) return legacyReport;
+	// Never replace authoritative summary windows with ordinary legacy Gemini
+	// counters. Only supplement the missing, independently identified Argon meter.
+	summaryReport.limits.push(...getAntigravityCounterLimits(legacyReport, "google-argon"));
+	summaryReport.metadata = { ...summaryReport.metadata, argonEligible: legacyReport.metadata?.argonEligible };
+	return summaryReport;
+}
+
+function buildLegacyUsageReport(
+	data: AntigravityUsageResponse,
+	params: UsageFetchParams,
+	successfulEndpoint: string,
+	nowMs: number,
+): UsageReport {
+	const credential = params.credential;
 	// The API returns per-model quota entries, but quota is shared across
 	// models within the same backend counter, tier, and reset window. Keep
 	// Google and Anthropic-backed Antigravity models separate so a healthy
@@ -530,20 +572,25 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 			counterKey: string;
 		}
 	>();
-	let earliestReset: number | undefined;
+	let argonEnabled = false;
+	let argonDisabled = false;
 
-	for (const [_modelId, modelInfo] of Object.entries(data.models ?? {})) {
+	for (const [modelId, modelInfo] of Object.entries(data.models ?? {})) {
+		const modelCounter = getAntigravityCounterKeyForModel(modelId);
+		if (modelCounter === "google-argon" && !modelInfo.isInternal) {
+			if (modelInfo.disabled === true) argonDisabled = true;
+			else argonEnabled = true;
+		}
+		if (modelInfo.disabled === true || modelInfo.isInternal === true) continue;
 		const quotaInfos = normalizeQuotaInfos(modelInfo);
 		const inferredDescriptors = inferWindowDescriptors(quotaInfos, nowMs);
 		for (const quotaInfo of quotaInfos) {
 			const amount = buildAmount(quotaInfo);
 			const window = parseWindow(quotaInfo, inferredDescriptors.get(quotaInfo));
-			if (window?.resetsAt) {
-				earliestReset = earliestReset ? Math.min(earliestReset, window.resetsAt) : window.resetsAt;
-			}
 			const tierKey = (quotaInfo.tier ?? "default").toLowerCase();
-			const counterName = formatCounterName(quotaInfo);
-			const counterKey = counterName?.toLowerCase() ?? "default";
+			const reportedCounterName = formatCounterName(quotaInfo);
+			const counterKey = modelCounter ?? reportedCounterName?.toLowerCase() ?? "default";
+			const counterName = modelCounter === "google-argon" ? "Gemini (Argon)" : reportedCounterName;
 			// Use the parsed window id when available so provider enum names like
 			// WINDOW_WEEKLY normalize into the same visible `/usage` group as
 			// weeklyQuotaInfo entries.
@@ -639,6 +686,9 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	const metadata: UsageReport["metadata"] = {
 		endpoint: successfulEndpoint,
 		projectId: credential.projectId,
+		// An enabled roster row proves access, not quota. Missing rows prove
+		// neither; an explicit disabled-only roster proves unavailability.
+		argonEligible: argonEnabled ? true : argonDisabled ? false : undefined,
 	};
 	if (credential.email) metadata.email = credential.email;
 	if (credential.accountId) metadata.accountId = credential.accountId;
@@ -656,7 +706,7 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 export const antigravityUsageProvider: UsageProvider = {
 	id: "google-antigravity",
-	cacheVersion: 2,
+	cacheVersion: 3,
 	fetchUsage: fetchAntigravityUsage,
 	supports: params => params.provider === "google-antigravity",
 };
@@ -687,6 +737,9 @@ export function scopeAntigravityLimitsForModel(
 	if (!counterKey) return [];
 	const backendLimits = getAntigravityCounterLimits(report, counterKey);
 	if (backendLimits.length > 0) return backendLimits;
+	// Old default/Google counters mixed ordinary Gemini with Argon. They cannot
+	// prove either exhaustion or recovery of the new independent Argon scope.
+	if (counterKey === "google-argon") return [];
 	return getAntigravityCounterLimits(report, "default");
 }
 
@@ -709,10 +762,36 @@ function rankAntigravityLimits(report: UsageReport, context: CredentialRankingCo
  * with healthier Gemini headroom.
  */
 export const antigravityRankingStrategy: CredentialRankingStrategy = {
+	modelAvailability(context) {
+		if (getAntigravityCounterKeyForModel(context.modelId) !== "google-argon") return undefined;
+		return report => {
+			const eligible = report?.metadata?.argonEligible;
+			if (typeof eligible === "boolean") return eligible;
+			// A dedicated measured quota proves access, not headroom, even when
+			// an older cached or caller-supplied report lacks roster metadata.
+			if (
+				report &&
+				getAntigravityCounterLimits(report, "google-argon").some(limit => {
+					const remaining = limit.amount.remainingFraction ?? limit.amount.remaining;
+					return remaining !== undefined && Number.isFinite(remaining);
+				})
+			) {
+				return true;
+			}
+			return undefined;
+		};
+	},
 	findWindowLimits(report, context) {
 		return { primary: rankAntigravityLimits(report, context)[0] };
 	},
 	scopeLimits: scopeAntigravityLimitsForModel,
+	hasPriorityBoost(primary, _primaryUncapped, context) {
+		if (getAntigravityCounterKeyForModel(context?.modelId) !== "google-argon") return false;
+		// An ordinary Gemini report does not measure Argon headroom. Prefer a
+		// funded Argon meter to an unmeasured account, including near its limit.
+		const remaining = primary?.amount.remainingFraction ?? primary?.amount.remaining;
+		return remaining !== undefined && Number.isFinite(remaining) && remaining > 0;
+	},
 	// Always return a scope for Antigravity so missing/unknown model context
 	// cannot fall through to AuthStorage's provider-wide block bucket.
 	blockScope(context) {
@@ -729,10 +808,21 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 			const counterKey = limit.id.split(":")[1];
 			if (counterKey) counterKeys.add(counterKey.toLowerCase());
 		}
-		return [...counterKeys].map(counterKey => ({
-			blockScope: `counter:${counterKey}`,
-			limits: getAntigravityCounterLimits(report, counterKey),
-		}));
+		return [...counterKeys].map(counterKey => {
+			const limits = getAntigravityCounterLimits(report, counterKey);
+			return {
+				blockScope: `counter:${counterKey}`,
+				limits,
+				// Unknown windows cannot prove recovery, even if a sibling window
+				// is positive. Every reported gate in this same bucket must be funded.
+				healthy:
+					limits.length > 0 &&
+					limits.every(limit => {
+						const remaining = limit.amount.remainingFraction ?? limit.amount.remaining;
+						return remaining !== undefined && Number.isFinite(remaining) && remaining > 0;
+					}),
+			};
+		});
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them
 	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo

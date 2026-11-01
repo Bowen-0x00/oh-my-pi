@@ -6,10 +6,11 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import type { UsageFetchContext, UsageFetchParams, UsageLimit } from "@oh-my-pi/pi-ai/usage";
+import type { UsageFetchContext, UsageFetchParams, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import {
 	antigravityRankingStrategy,
 	antigravityUsageProvider,
+	getAntigravityCounterKeyForModel,
 	scopeAntigravityLimitsForModel,
 } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 
@@ -148,7 +149,8 @@ describe("antigravity usage provider", () => {
 		const googleLimits = scopeAntigravityLimitsForModel(report!, { modelId: "gemini-3.8-flash" });
 		const weekly = googleLimits.find(limit => limit.id.endsWith(":gemini-weekly"));
 		const fiveHour = googleLimits.find(limit => limit.scope.windowId === "5h");
-		const argonWeekly = googleLimits.find(limit => limit.id.endsWith(":gemini-argon-wtu-weekly"));
+		const argonLimits = scopeAntigravityLimitsForModel(report!, { modelId: "gemini-4-argon" });
+		const argonWeekly = argonLimits.find(limit => limit.id.endsWith(":gemini-argon-wtu-weekly"));
 		expect(weekly?.amount.usedFraction).toBeCloseTo(0.12);
 		expect(weekly?.window?.durationMs).toBe(7 * 24 * 60 * 60 * 1000);
 		expect(fiveHour?.amount.usedFraction).toBeCloseTo(0.41);
@@ -159,7 +161,10 @@ describe("antigravity usage provider", () => {
 		expect(argonWeekly?.label).toBe("Gemini (Argon)");
 		expect(argonWeekly?.amount.usedFraction).toBeCloseTo(0.98);
 		expect(argonWeekly?.window?.durationMs).toBe(7 * 24 * 60 * 60 * 1000);
-		expect(googleLimits.every(limit => limit.label === "Gemini" || limit.label === "Gemini (Argon)")).toBeTrue();
+		expect(googleLimits).toHaveLength(2);
+		expect(argonLimits).toHaveLength(1);
+		expect(googleLimits.every(limit => limit.label === "Gemini")).toBeTrue();
+		expect(argonWeekly?.id).toStartWith("google-antigravity:google-argon:");
 		const claudeLimits = scopeAntigravityLimitsForModel(report!, { modelId: "claude-sonnet-4-6" });
 		const gptLimits = scopeAntigravityLimitsForModel(report!, { modelId: "gpt-oss-120b" });
 		expect(claudeLimits).toHaveLength(2);
@@ -171,6 +176,165 @@ describe("antigravity usage provider", () => {
 		expect(claudeLimits.map(limit => limit.scope.sharedGroup).sort()).toEqual(
 			gptLimits.map(limit => limit.scope.sharedGroup).sort(),
 		);
+	});
+
+	it.each([
+		{ geminiRemaining: 0.8, argonRemaining: 0 },
+		{ geminiRemaining: 0, argonRemaining: 0.8 },
+	])(
+		"isolates summary ranking and healing for $geminiRemaining Gemini / $argonRemaining Argon",
+		async ({ geminiRemaining, argonRemaining }) => {
+			const report = await antigravityUsageProvider.fetchUsage!(
+				{ provider: "google-antigravity", credential: makeCredential() },
+				makeCtx(
+					fakeFetch({
+						buckets: [
+							{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: geminiRemaining },
+							{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: argonRemaining },
+						],
+					}),
+				),
+			);
+			const gemini = antigravityRankingStrategy.findWindowLimits(report!, { modelId: "gemini-3.8-flash" });
+			const argon = antigravityRankingStrategy.findWindowLimits(report!, { modelId: "gemini-4-argon" });
+			expect(gemini.primary?.amount.remainingFraction).toBe(geminiRemaining);
+			expect(argon.primary?.amount.remainingFraction).toBe(argonRemaining);
+			expect(antigravityRankingStrategy.blockScope?.({ modelId: "gemini-4-argon" })).toBe("counter:google-argon");
+			const healing = antigravityRankingStrategy.healableBlockScopes?.(report!);
+			expect(healing?.find(scope => scope.blockScope === "counter:google-argon")?.healthy).toBe(argonRemaining > 0);
+			expect(healing?.find(scope => scope.blockScope === "counter:google")?.healthy).toBe(geminiRemaining > 0);
+		},
+	);
+
+	it("keeps Argon's low, medium and high legacy SKUs in one independent worst-case meter", async () => {
+		const quota = { modelProvider: "MODEL_PROVIDER_GOOGLE", windowId: "weekly" };
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential() },
+			makeCtx(
+				fakeFetch({
+					models: {
+						"gemini-3.8-flash": makeApiModel("Gemini", { ...quota, remainingFraction: 0.9 }),
+						"gemini-4-argon-low": makeApiModel("Argon Low", { ...quota, remainingFraction: 0.3 }),
+						"gemini-4-argon-medium": makeApiModel("Argon Medium", {
+							...quota,
+							resetTime: new Date(Date.now() + 6 * 24 * 3600_000).toISOString(),
+						}),
+						"gemini-4-argon-high": makeApiModel("Argon High", { ...quota, remainingFraction: 0.7 }),
+					},
+				}),
+			),
+		);
+		expect(report?.limits).toHaveLength(2);
+		const argonLimits = scopeAntigravityLimitsForModel(report!, { modelId: "gemini-4-argon" });
+		expect(argonLimits).toHaveLength(1);
+		expect(argonLimits[0]?.amount.remainingFraction).toBe(0);
+		expect(argonLimits[0]?.status).toBe("exhausted");
+		expect(
+			scopeAntigravityLimitsForModel(report!, { modelId: "gemini-3.8-flash" })[0]?.amount.remainingFraction,
+		).toBe(0.9);
+	});
+
+	it.each([
+		{ models: { "gemini-4-argon-disabled": { disabled: true } }, eligible: false },
+		{ models: { "gemini-4-argon-low": {} }, eligible: true },
+		{ models: {}, eligible: undefined },
+	])("supplements an Argon-less summary using explicit roster evidence: $eligible", async ({ models, eligible }) => {
+		const requestedUrls: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			requestedUrls.push(String(input));
+			const payload = String(input).endsWith(":retrieveUserQuotaSummary")
+				? { buckets: [{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 1 }] }
+				: { models };
+			return new Response(JSON.stringify(payload), { status: 200 });
+		};
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential() },
+			makeCtx(fetchImpl),
+		);
+		expect(requestedUrls).toEqual([
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+		]);
+		const context = { modelId: "gemini-4-argon" };
+		expect(antigravityRankingStrategy.modelAvailability?.(context)?.(report!)).toBe(eligible);
+		expect(scopeAntigravityLimitsForModel(report!, context)).toEqual([]);
+		expect(antigravityRankingStrategy.findWindowLimits(report!, context).primary).toBeUndefined();
+		expect(
+			antigravityRankingStrategy
+				.healableBlockScopes?.(report!)
+				.some(scope => scope.blockScope === "counter:google-argon"),
+		).toBeFalse();
+	});
+
+	it("supplements only Argon legacy quota without replacing summary Gemini windows", async () => {
+		const fetchImpl: FetchImpl = async input =>
+			new Response(
+				JSON.stringify(
+					String(input).endsWith(":retrieveUserQuotaSummary")
+						? { buckets: [{ bucketId: "gemini-5h", window: "5h", remainingFraction: 0.8 }] }
+						: {
+								models: {
+									"gemini-3.8-flash": makeApiModel("Gemini", { remainingFraction: 0 }),
+									"gemini-4-argon-high": makeApiModel("Argon", { remainingFraction: 0.4, windowId: "weekly" }),
+								},
+							},
+				),
+				{ status: 200 },
+			);
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential() },
+			makeCtx(fetchImpl),
+		);
+		expect(report?.limits).toHaveLength(2);
+		expect(
+			scopeAntigravityLimitsForModel(report!, { modelId: "gemini-3.8-flash" })[0]?.amount.remainingFraction,
+		).toBe(0.8);
+		expect(scopeAntigravityLimitsForModel(report!, { modelId: "gemini-4-argon" })[0]?.amount.remainingFraction).toBe(
+			0.4,
+		);
+	});
+
+	it("preserves summary usage when the optional roster probe fails", async () => {
+		const fetchImpl: FetchImpl = async input => {
+			if (String(input).endsWith(":fetchAvailableModels")) throw new Error("roster unavailable");
+			return new Response(
+				JSON.stringify({
+					buckets: [{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.8 }],
+				}),
+				{ status: 200 },
+			);
+		};
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential(), baseUrl: "https://quota.example" },
+			makeCtx(fetchImpl),
+		);
+		expect(report?.limits).toHaveLength(1);
+		expect(report?.metadata?.argonEligible).toBeUndefined();
+	});
+
+	it("keeps completed summary quota when the optional roster request reaches its shared timeout", async () => {
+		const controller = new AbortController();
+		const fetchImpl: FetchImpl = async input => {
+			if (String(input).endsWith(":fetchAvailableModels")) {
+				controller.abort(new DOMException("Usage probe timed out", "TimeoutError"));
+				throw controller.signal.reason;
+			}
+			return Response.json({
+				buckets: [{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0 }],
+			});
+		};
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{
+				provider: "google-antigravity",
+				credential: makeCredential(),
+				baseUrl: "https://quota.example",
+				signal: controller.signal,
+			},
+			makeCtx(fetchImpl),
+		);
+		expect(controller.signal.aborted).toBeTrue();
+		expect(scopeAntigravityLimitsForModel(report!, { modelId: "gemini-3.8-flash" })[0]?.status).toBe("exhausted");
+		expect(scopeAntigravityLimitsForModel(report!, { modelId: "gemini-4-argon" })).toEqual([]);
 	});
 
 	it("keeps the worst remainingFraction when merging same tier", async () => {
@@ -510,6 +674,91 @@ describe("antigravity ranking strategy", () => {
 			status: remainingFraction <= 0 ? "exhausted" : remainingFraction <= 0.1 ? "warning" : "ok",
 		};
 	}
+
+	it.each([
+		"gemini-4-argon",
+		"gemini-4-argon-low",
+		"gemini-4-argon-medium",
+		"gemini-4-argon-high",
+		"gemini-4-argon-disabled",
+	])("resolves the independent catalog quota scope for %s", modelId => {
+		expect(getAntigravityCounterKeyForModel(modelId)).toBe("google-argon");
+	});
+
+	it("does not interpret legacy mixed counters as Argon quota or eligibility", () => {
+		const report: UsageReport = {
+			provider: "google-antigravity",
+			fetchedAt: Date.now(),
+			limits: [
+				{ ...makeLimit(1), id: "google-antigravity:google:default:weekly" },
+				{ ...makeLimit(0), id: "google-antigravity:default:default:weekly" },
+			],
+		};
+		const context = { modelId: "gemini-4-argon" };
+		expect(scopeAntigravityLimitsForModel(report, context)).toEqual([]);
+		expect(antigravityRankingStrategy.findWindowLimits(report, context).primary).toBeUndefined();
+		expect(antigravityRankingStrategy.modelAvailability?.(context)?.(report)).toBeUndefined();
+		expect(antigravityRankingStrategy.modelAvailability?.(context)?.(null)).toBeUndefined();
+	});
+
+	it.each([undefined, 0, Number.NaN, 0.2])(
+		"only heals a same-counter block from measured positive quota (%s)",
+		remaining => {
+			const limit: UsageLimit = {
+				id: "google-antigravity:google-argon:default:weekly",
+				label: "Argon",
+				scope: { provider: "google-antigravity" },
+				amount: { unit: "percent", remainingFraction: remaining },
+				status: remaining === 0 ? "exhausted" : "unknown",
+			};
+			const report: UsageReport = { provider: "google-antigravity", fetchedAt: Date.now(), limits: [limit] };
+			const healing = antigravityRankingStrategy.healableBlockScopes?.(report);
+			expect(healing?.find(scope => scope.blockScope === "counter:google-argon")?.healthy).toBe(remaining === 0.2);
+			expect(healing?.some(scope => scope.blockScope === "counter:google")).toBeFalse();
+		},
+	);
+
+	it("does not infer plan permission from a present but unmeasured Argon bucket", async () => {
+		let calls = 0;
+		const fetchImpl: FetchImpl = async () => {
+			calls += 1;
+			return new Response(
+				JSON.stringify({
+					buckets: [{ bucketId: "gemini-argon-wtu-weekly", window: "weekly" }],
+				}),
+				{ status: 200 },
+			);
+		};
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential() },
+			makeCtx(fetchImpl),
+		);
+		expect(calls).toBe(1);
+		expect(report?.limits[0]?.status).toBe("unknown");
+		expect(antigravityRankingStrategy.modelAvailability?.({ modelId: "gemini-4-argon" })?.(report!)).toBeUndefined();
+		expect(antigravityRankingStrategy.healableBlockScopes?.(report!)[0]?.healthy).toBeFalse();
+	});
+
+	it("requires all reported windows to prove recovery and honors an explicit disabled roster", () => {
+		const report: UsageReport = {
+			provider: "google-antigravity",
+			fetchedAt: Date.now(),
+			limits: [
+				{ ...makeLimit(0.8), id: "google-antigravity:google-argon:default:5h" },
+				{
+					id: "google-antigravity:google-argon:default:weekly",
+					label: "Argon Weekly",
+					scope: { provider: "google-antigravity" },
+					amount: { unit: "percent" },
+					status: "unknown",
+				},
+			],
+		};
+		expect(antigravityRankingStrategy.healableBlockScopes?.(report)[0]?.healthy).toBeFalse();
+		const gate = antigravityRankingStrategy.modelAvailability?.({ modelId: "gemini-4-argon" });
+		expect(gate?.(report)).toBeTrue();
+		expect(gate?.({ ...report, metadata: { argonEligible: false } })).toBeFalse();
+	});
 
 	it("maps the most-pressured counter to primary and leaves secondary unset", () => {
 		// fetchAntigravityUsage sorts ascending by remainingFraction, so a real

@@ -6,12 +6,29 @@ import { compileBehavior } from "../scripts/compat-compiler/compile-behavior";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
 import { compileProviders } from "../scripts/compat-compiler/compile-providers";
 import { compileTaxonomy } from "../scripts/compat-compiler/compile-taxonomy";
-import { cursorModelParameters } from "../src/compat/behavior";
+import { cursorModelParameters, quotaTierFor } from "../src/compat/behavior";
 import committed from "../src/compat/rules.json";
 
 const AUTH_IDS_PATH = path.join(import.meta.dir, "../src/compat/auth-ids.ts");
 
 const RULES_DIR = path.join(import.meta.dir, "../src/compat/rules");
+
+test("Antigravity Argon quota membership precedes the ordinary Gemini fallback", () => {
+	for (const id of [
+		"gemini-4-argon",
+		"gemini-4-argon-low",
+		"gemini-4-argon-medium",
+		"gemini-4-argon-high",
+		"gemini-4-argon-disabled",
+		"gemini-4-argon-future-sku",
+	]) {
+		expect(quotaTierFor("google-antigravity", id)).toBe("google-argon");
+	}
+	expect(quotaTierFor("google-antigravity", "gemini-3.8-flash")).toBe("google");
+	expect(quotaTierFor("google-antigravity", "gemini-4-pro")).toBe("google");
+	expect(quotaTierFor("google-antigravity", "claude-sonnet-4-6")).toBe("anthropic");
+	expect(quotaTierFor("google-antigravity", "unrecognized")).toBeUndefined();
+});
 
 function taxonomySources(text: string) {
 	return [

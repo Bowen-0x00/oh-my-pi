@@ -14,6 +14,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
@@ -35,7 +36,7 @@ function ageCredentialBlockRows(dbPath: string): void {
 }
 
 type AntigravityWindowSpec = {
-	counter: "google" | "anthropic" | "openai" | "default";
+	counter: "google" | "google-argon" | "anthropic" | "openai" | "default";
 	usedFraction: number;
 	resetInMs: number;
 };
@@ -71,6 +72,7 @@ function createAntigravityReport(args: {
 	projectId: string;
 	accountId: string;
 	windows: AntigravityWindowSpec[];
+	argonEligible?: boolean;
 }): UsageReport {
 	// fetchAntigravityUsage sorts ascending by remainingFraction; mirror
 	// that here so the strategy sees the same shape it would in production.
@@ -81,7 +83,7 @@ function createAntigravityReport(args: {
 		provider: "google-antigravity",
 		fetchedAt: Date.now(),
 		limits,
-		metadata: { accountId: args.accountId, projectId: args.projectId },
+		metadata: { accountId: args.accountId, projectId: args.projectId, argonEligible: args.argonEligible },
 	};
 }
 
@@ -347,5 +349,330 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		const fresh = counts.get("api-acct-fresh") ?? 0;
 		const loaded = counts.get("api-acct-loaded") ?? 0;
 		expect(fresh).toBeGreaterThan(loaded);
+	});
+
+	test.each([
+		[true, 0.2],
+		[true, 0.95],
+		[false, 0.2],
+	] as const)(
+		"prefers measured Argon quota over an unmeasured account (eligible=%s, measured usage=%s)",
+		async (argonEligible, usedFraction) => {
+			if (!authStorage) throw new Error("test setup failed");
+			await authStorage.credentials.set("google-antigravity", [
+				{ type: "oauth", ...createCredential("acct-unknown", "proj-unknown", "unknown@example.com") },
+				{ type: "oauth", ...createCredential("acct-measured", "proj-measured", "measured@example.com") },
+			]);
+			usageByAccount.set(
+				"acct-unknown",
+				createAntigravityReport({
+					accountId: "acct-unknown",
+					projectId: "proj-unknown",
+					// Roster eligibility never proves remaining Argon quota.
+					argonEligible,
+					windows: [{ counter: "google", usedFraction: 0.01, resetInMs: 5 * HOUR_MS }],
+				}),
+			);
+			usageByAccount.set(
+				"acct-measured",
+				createAntigravityReport({
+					accountId: "acct-measured",
+					projectId: "proj-measured",
+					argonEligible: true,
+					windows: [
+						{ counter: "google", usedFraction: 1, resetInMs: 5 * HOUR_MS },
+						{ counter: "google-argon", usedFraction, resetInMs: 5 * HOUR_MS },
+					],
+				}),
+			);
+
+			expect(
+				await authStorage.keys.get("google-antigravity", "argon-measured-first", { modelId: "gemini-4-argon" }),
+			).toBe("api-acct-measured");
+		},
+	);
+
+	test("keeps an account usable when Argon quota and roster eligibility are unknown", async () => {
+		if (!authStorage || !store?.getCredentialBlock) throw new Error("test setup failed");
+		await authStorage.credentials.set("google-antigravity", [
+			{ type: "oauth", ...createCredential("acct-unreported", "proj-unreported", "unreported@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-unreported",
+			createAntigravityReport({
+				accountId: "acct-unreported",
+				projectId: "proj-unreported",
+				windows: [{ counter: "google", usedFraction: 0.1, resetInMs: 5 * HOUR_MS }],
+			}),
+		);
+
+		expect(
+			await authStorage.keys.get("google-antigravity", "argon-unreported-fallback", { modelId: "gemini-4-argon" }),
+		).toBe("api-acct-unreported");
+		const row = store.listAuthCredentials("google-antigravity")[0];
+		if (!row) throw new Error("expected credential row");
+		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google-argon")).toBeUndefined();
+	});
+
+	test("tries unblocked unknown Argon access before a known eligible but exhausted account", async () => {
+		if (!authStorage || !store?.getCredentialBlock) throw new Error("test setup failed");
+		await authStorage.credentials.set("google-antigravity", [
+			{ type: "oauth", ...createCredential("acct-exhausted", "proj-exhausted", "exhausted@example.com") },
+			{ type: "oauth", ...createCredential("acct-unknown", "proj-unknown", "unknown@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-exhausted",
+			createAntigravityReport({
+				accountId: "acct-exhausted",
+				projectId: "proj-exhausted",
+				argonEligible: true,
+				windows: [{ counter: "google-argon", usedFraction: 1, resetInMs: 24 * HOUR_MS }],
+			}),
+		);
+		usageByAccount.set(
+			"acct-unknown",
+			createAntigravityReport({
+				accountId: "acct-unknown",
+				projectId: "proj-unknown",
+				windows: [{ counter: "google", usedFraction: 0, resetInMs: 5 * HOUR_MS }],
+			}),
+		);
+		expect(
+			await authStorage.keys.get("google-antigravity", "argon-unknown-before-blocked", {
+				modelId: "gemini-4-argon",
+			}),
+		).toBe("api-acct-unknown");
+		const exhausted = store.listAuthCredentials("google-antigravity")[0];
+		if (!exhausted) throw new Error("expected exhausted credential");
+		expect(
+			store.getCredentialBlock(exhausted.id, "google-antigravity:oauth", "counter:google-argon"),
+		).toBeGreaterThan(Date.now());
+	});
+
+	test("retains a healthy warm Argon pin without probing siblings after usage cache invalidation", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.credentials.set("google-antigravity", [
+			{ type: "oauth", ...createCredential("acct-pin", "proj-pin", "pin@example.com") },
+			{ type: "oauth", ...createCredential("acct-peer", "proj-peer", "peer@example.com") },
+		]);
+		for (const [accountId, usedFraction] of [
+			["acct-pin", 0.1],
+			["acct-peer", 0.3],
+		] as const) {
+			usageByAccount.set(
+				accountId,
+				createAntigravityReport({
+					accountId,
+					projectId: `proj-${accountId}`,
+					argonEligible: true,
+					windows: [{ counter: "google-argon", usedFraction, resetInMs: 24 * HOUR_MS }],
+				}),
+			);
+		}
+		const options = { modelId: "gemini-4-argon" };
+		expect(await authStorage.keys.get("google-antigravity", "argon-warm", options)).toBe("api-acct-pin");
+		await authStorage.usage.invalidate("google-antigravity");
+		const probe = vi.spyOn(usageProvider, "fetchUsage");
+		expect(await authStorage.keys.get("google-antigravity", "argon-warm", options)).toBe("api-acct-pin");
+		expect(probe.mock.calls.map(([params]) => params.credential.accountId)).toEqual(["acct-pin"]);
+	});
+
+	test("rejects an explicitly unavailable Argon account in every fallback while ordinary Gemini stays usable", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.credentials.set("google-antigravity", [
+			{ type: "oauth", ...createCredential("acct-disabled", "proj-disabled", "disabled@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-disabled",
+			createAntigravityReport({
+				accountId: "acct-disabled",
+				projectId: "proj-disabled",
+				argonEligible: false,
+				windows: [{ counter: "google", usedFraction: 0, resetInMs: 5 * HOUR_MS }],
+			}),
+		);
+		expect(
+			await authStorage.keys.get("google-antigravity", "argon-unavailable", { modelId: "gemini-4-argon" }),
+		).toBeUndefined();
+		expect(
+			await authStorage.health.model("google-antigravity", { modelId: "gemini-4-argon", reserveFraction: 0.1 }),
+		).toMatchObject({
+			state: "depleted",
+			accounts: [],
+		});
+		expect(
+			await authStorage.keys.get("google-antigravity", "ordinary-available", { modelId: "gemini-3.8-flash" }),
+		).toBe("api-acct-disabled");
+	});
+
+	test.each([
+		[1, "depleted"],
+		[0.95, "reserve"],
+		[undefined, "unknown"],
+	] as const)("excludes unavailable Argon accounts from pool health (%s used)", async (usedFraction, state) => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.credentials.set("google-antigravity", [
+			{ type: "oauth", ...createCredential("acct-disabled", "proj-disabled", "disabled@example.com") },
+			{ type: "oauth", ...createCredential("acct-other", "proj-other", "other@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-disabled",
+			createAntigravityReport({
+				accountId: "acct-disabled",
+				projectId: "proj-disabled",
+				argonEligible: false,
+				windows: [{ counter: "google", usedFraction: 0, resetInMs: 5 * HOUR_MS }],
+			}),
+		);
+		usageByAccount.set(
+			"acct-other",
+			createAntigravityReport({
+				accountId: "acct-other",
+				projectId: "proj-other",
+				windows: usedFraction === undefined ? [] : [{ counter: "google-argon", usedFraction, resetInMs: HOUR_MS }],
+			}),
+		);
+		const health = await authStorage.health.model("google-antigravity", {
+			modelId: "gemini-4-argon",
+			reserveFraction: 0.1,
+		});
+		expect(health.state).toBe(state);
+		expect(health.accounts.map(account => account.credentialId)).toEqual([
+			authStorage.credentials.list("google-antigravity")[1]!.id,
+		]);
+	});
+
+	test.each(["missing", "exhausted"] as const)(
+		"ordinary Gemini recovery cannot heal an Argon block when Argon usage is %s",
+		async argonUsage => {
+			if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
+				throw new Error("test setup failed");
+			}
+			await authStorage.credentials.set("google-antigravity", [
+				{ type: "oauth", ...createCredential("acct-blocked", "proj-blocked", "blocked@example.com") },
+				{ type: "oauth", ...createCredential("acct-sibling", "proj-sibling", "sibling@example.com") },
+			]);
+			const row = store.listAuthCredentials("google-antigravity")[0];
+			if (!row) throw new Error("expected credential row");
+			const blockedUntilMs = Date.now() + 24 * HOUR_MS;
+			store.upsertCredentialBlock({
+				credentialId: row.id,
+				providerKey: "google-antigravity:oauth",
+				blockScope: "counter:google-argon",
+				blockedUntilMs,
+			});
+			ageCredentialBlockRows(dbPath);
+			const windows: AntigravityWindowSpec[] = [{ counter: "google", usedFraction: 0, resetInMs: 5 * HOUR_MS }];
+			if (argonUsage === "exhausted") {
+				windows.push({ counter: "google-argon", usedFraction: 1, resetInMs: 24 * HOUR_MS });
+			}
+			usageByAccount.set(
+				"acct-blocked",
+				createAntigravityReport({
+					accountId: "acct-blocked",
+					projectId: "proj-blocked",
+					argonEligible: true,
+					windows,
+				}),
+			);
+			usageByAccount.set(
+				"acct-sibling",
+				createAntigravityReport({
+					accountId: "acct-sibling",
+					projectId: "proj-sibling",
+					argonEligible: true,
+					windows: [{ counter: "google-argon", usedFraction: 0.3, resetInMs: 5 * HOUR_MS }],
+				}),
+			);
+
+			// Run reconciliation after the guard expires, rather than merely
+			// checking that a freshly-written block survives its five-minute guard.
+			await authStorage.usage.reports();
+			expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google-argon")).toBe(
+				blockedUntilMs,
+			);
+			expect(
+				await authStorage.keys.get("google-antigravity", "argon-still-blocked", { modelId: "gemini-4-argon" }),
+			).toBe("api-acct-sibling");
+			expect(
+				await authStorage.keys.get("google-antigravity", "ordinary-gemini-recovered", {
+					modelId: "gemini-3-flash",
+				}),
+			).toBe("api-acct-blocked");
+		},
+	);
+
+	test("QUOTA_EXHAUSTED rotates a warm Argon session and persists its block for another AuthStorage instance", async () => {
+		if (!authStorage || !store?.getCredentialBlock) throw new Error("test setup failed");
+		await authStorage.credentials.set("google-antigravity", [
+			{ type: "oauth", ...createCredential("acct-first", "proj-first", "first@example.com") },
+			{ type: "oauth", ...createCredential("acct-next", "proj-next", "next@example.com") },
+		]);
+		for (const [accountId, projectId, usedFraction] of [
+			["acct-first", "proj-first", 0.05],
+			["acct-next", "proj-next", 0.3],
+		] as const) {
+			usageByAccount.set(
+				accountId,
+				createAntigravityReport({
+					accountId,
+					projectId,
+					argonEligible: true,
+					windows: [
+						{ counter: "google", usedFraction, resetInMs: 5 * HOUR_MS },
+						{ counter: "google-argon", usedFraction, resetInMs: 5 * HOUR_MS },
+					],
+				}),
+			);
+		}
+		const firstSession = "argon-warm-session";
+		const modelId = "gemini-4-argon";
+		const firstKey = await authStorage.keys.get("google-antigravity", firstSession, { modelId });
+		expect(firstKey).toBe("api-acct-first");
+		const row = store.listAuthCredentials("google-antigravity")[0];
+		if (!row) throw new Error("expected credential row");
+
+		const peerStore = await SqliteAuthCredentialStore.open(dbPath);
+		try {
+			const peerStorage = new AuthStorage(peerStore, {
+				usageProviderResolver: provider => (provider === "google-antigravity" ? usageProvider : undefined),
+			});
+			await peerStorage.credentials.reload();
+			// Give the other instance its own warm pin and cached pre-429 report.
+			expect(await peerStorage.keys.get("google-antigravity", "argon-peer-session", { modelId })).toBe(firstKey);
+			const rotation = await authStorage.limits.rotate("google-antigravity", firstSession, {
+				modelId,
+				apiKey: firstKey,
+				credentialId: row.id,
+				error: new ProviderHttpError(
+					'Cloud Code Assist API error (429): {"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exhausted","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}',
+					429,
+				),
+			});
+			expect(rotation.switched).toBe(true);
+			const blockedUntilMs = store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google-argon");
+			expect(blockedUntilMs).toBeGreaterThan(Date.now());
+			expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google")).toBeUndefined();
+			expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "auth")).toBeUndefined();
+
+			// Lagging healthy usage must not immediately undo the actual 429.
+			await authStorage.usage.reports();
+			for (let attempt = 0; attempt < 3; attempt += 1) {
+				expect(await authStorage.keys.get("google-antigravity", firstSession, { modelId })).toBe("api-acct-next");
+			}
+			expect(await peerStorage.keys.get("google-antigravity", "argon-peer-session", { modelId })).toBe(
+				"api-acct-next",
+			);
+			expect(peerStore.getCredentialBlock?.(row.id, "google-antigravity:oauth", "counter:google-argon")).toBe(
+				blockedUntilMs,
+			);
+			expect(
+				await authStorage.keys.get("google-antigravity", "ordinary-after-argon-429", {
+					modelId: "gemini-3-flash",
+				}),
+			).toBe(firstKey);
+		} finally {
+			peerStore.close();
+		}
 	});
 });
