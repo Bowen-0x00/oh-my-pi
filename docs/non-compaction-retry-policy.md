@@ -35,6 +35,23 @@ Automatic request-body-timeout recovery elides only eligible tool-result text. I
 
 This is not context-overflow or payload-rejection handling and does not establish a provider byte limit or gateway cause. It never walks configured compaction methods, so it does not select remote compaction, handoff, or snapcompact; ordinary 408/429/5xx retries remain unchanged.
 
+### Focused next-step recovery after empty transport failures
+
+Catalog policy `retry-step-redirect` opts Antigravity Gemini 4 Argon into one
+hidden next-step instruction per retry saga. Beginning with the second
+retryable socket/stream-stall failure, a turn containing only thinking or
+whitespace is retried with a directive to take one small concrete action
+before planning further. The original user goal, history, model, effort,
+timeout settings, and retry budget are unchanged.
+
+Generated non-whitespace text suppresses this redirect even when the host
+buffers it. Images, tool calls, server tools, preserved tool continuations,
+usage/auth failures, thinking-loop errors, cancellation, and model switches
+also suppress it. No credential is marked quota-exhausted for a transport
+failure. This changes the retried request; it does not guarantee an external
+proxy or provider will remain available, nor does it replay already executed
+work.
+
 ## Retry classification
 
 `TurnRecovery.isRetryableError(...)` requires all of the following:

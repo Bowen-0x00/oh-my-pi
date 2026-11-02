@@ -28,6 +28,12 @@ provider "google-antigravity" {
 	// logical ids whose effort routing selects a profiled wire id later.
 	preserves-max-output-tokens #false
 
+	// Long tool-using Argon turns may stall after thinking. After repeated,
+	// replay-safe transport failures, retry with one focused next action.
+	models "gemini-4-argon" "gemini-4-argon-low" "gemini-4-argon-medium" "gemini-4-argon-high" {
+		retry-step-redirect #true
+	}
+
 	class "anthropic" {
 		// Claude here is Vertex Anthropic: one image whose base64 passes
 		// 5,242,880 bytes is a 400 "image exceeds 5 MB maximum" (half the

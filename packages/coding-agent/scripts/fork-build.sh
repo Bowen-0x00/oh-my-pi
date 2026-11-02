@@ -113,9 +113,15 @@ done
 	packages/ai/test/rate-limit-utils.test.ts \
 	packages/ai/test/auth-storage-oauth-account-select.test.ts \
 	packages/ai/test/auth-storage-session-restriction.test.ts \
-	packages/ai/test/auth-storage-force-refresh-rotate.test.ts
+	packages/ai/test/auth-storage-force-refresh-rotate.test.ts \
+	packages/coding-agent/test/agent-session-transport-step-retry.test.ts \
+	packages/coding-agent/test/agent-session-thinking-loop-retry.test.ts \
+	packages/coding-agent/test/agent-session-retry-cap.test.ts \
+	packages/coding-agent/test/turn-recovery-replay-unsafe.test.ts \
+	packages/coding-agent/test/agent-session-manual-retry.test.ts
 "$bun" run --cwd packages/ai check:types
 "$bun" run --cwd packages/catalog check:types
+"$bun" run --cwd packages/coding-agent check:types
 if ((finish_merge)); then
 	git add -- "$generated"
 	git commit --no-edit

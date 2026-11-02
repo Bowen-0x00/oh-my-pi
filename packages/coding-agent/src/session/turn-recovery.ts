@@ -22,6 +22,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -36,6 +37,7 @@ import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with 
 import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
 import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
+import transportStepRetryTemplate from "../prompts/system/transport-step-retry.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
 	AUTO_THINKING,
@@ -413,6 +415,7 @@ export class TurnRecovery {
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
 	#streamStallContinueCount = 0;
+	#transportStepRedirected = false;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -891,6 +894,7 @@ export class TurnRecovery {
 	resolveRetry(): void {
 		this.#refusalWalkTried.clear();
 		this.#accountPolicyRotationsRemaining.clear();
+		this.#transportStepRedirected = false;
 		if (this.#retryResolve) {
 			this.#retryResolve();
 			this.#retryResolve = undefined;
@@ -3136,6 +3140,7 @@ export class TurnRecovery {
 		// pattern instead of re-sampling the same stalled reasoning.
 		this.#maybeInjectThinkingLoopRedirect(id);
 		this.#maybeInjectMalformedFunctionCallRedirect(id, maxRetries, preserveFailedTurn, switchedModel);
+		this.#maybeInjectTransportStepRedirect(message, id, preserveFailedTurn, switchedModel);
 
 		// Quota waits follow the wall clock; ordinary backoff stays monotonic.
 		const retryAbortController = new AbortController();
@@ -3276,6 +3281,58 @@ export class TurnRecovery {
 			"agent",
 		);
 	}
+	/**
+	 * Change a replay-safe request after repeated transport failures instead of
+	 * resampling the same long reasoning until the retry budget is exhausted.
+	 * Catalog opt-in is narrow; never replay visible output or tool side effects.
+	 */
+	#maybeInjectTransportStepRedirect(
+		message: AssistantMessage,
+		id: number,
+		preserveFailedTurn: boolean,
+		switchedModel: boolean,
+	): void {
+		if (this.#transportStepRedirected || this.#retryAttempt < 2 || preserveFailedTurn || switchedModel) return;
+		if (message.stopReason !== "error" || !AIError.retriable(id)) return;
+		if (
+			AIError.is(id, AIError.Flag.UsageLimit) ||
+			AIError.is(id, AIError.Flag.AuthFailed) ||
+			AIError.is(id, AIError.Flag.ThinkingLoop) ||
+			this.#hasReplayUnsafeOutput(message) ||
+			message.content.some(block => block.type === "text" && NON_WHITESPACE_RE.test(block.text))
+		)
+			return;
+		if (
+			!isUnexpectedSocketCloseMessage(message.errorMessage ?? "") &&
+			!this.#isMidStreamTransportFailure(message, id)
+		)
+			return;
+		const model = this.#host.model();
+		if (!model || resolveCatalogPolicy(model).retryStepRedirect !== true) return;
+		const customType = "transport-step-redirect";
+		this.#host.agent.appendMessage({
+			role: "custom",
+			customType,
+			content: transportStepRetryTemplate,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		this.#host.sessionManager.appendCustomMessageEntry(
+			customType,
+			transportStepRetryTemplate,
+			false,
+			undefined,
+			"agent",
+		);
+		this.#transportStepRedirected = true;
+		logger.info("Repeated replay-safe transport failure; retrying with a focused next action", {
+			provider: model.provider,
+			model: model.id,
+			attempt: this.#retryAttempt,
+		});
+	}
+
 	#maybeInjectMalformedFunctionCallRedirect(
 		id: number,
 		maxRetries: number,

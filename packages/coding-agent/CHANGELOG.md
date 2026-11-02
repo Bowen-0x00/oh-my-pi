@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Fixed repeated thinking-only Antigravity Argon connection failures being retried unchanged: replay-safe retries now request one focused next action without increasing the retry budget or replaying tools.
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
 ## [18.15.0] - 2026-11-01

@@ -464,6 +464,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["off", "semantic"],
 	},
+	/** Re-sample replay-safe transport failures as a focused next action after repeated stalls. */
+	"retry-step-redirect": {
+		key: "retryStepRedirect",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },

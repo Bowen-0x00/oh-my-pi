@@ -46,6 +46,7 @@
 - 未知额度不能伪造为 0% 或 100%。恢复冷却需要同一个额度桶的新鲜、有限、正余额证据；认证封禁不能被额度报告解除。
 - 健康会话保持账号绑定，不因每次请求强制探测全池；不要增加第二套重试层或无限重试。
 - 不改变 Codex 等其他供应商已有的账号优先级语义。流式输出已经交付后，不可通过重放整个请求拼接另一账号的输出。
+- 保留 Argon 的有界“小步恢复”：连续且可安全重放的连接/流停滞错误后，可注入一次聚焦下一步的指令；不能增加重试预算，不能在已有非空答案、图片或工具副作用后重复执行，也不能将传输错误当作额度耗尽。
 
 相关实现主要位于 `packages/ai/src/usage/google-antigravity.ts`、`packages/ai/src/auth/{select,health}.ts`、`packages/ai/src/usage.ts`、`packages/catalog/src/compat/rules/runtime/behavior.kdl`。相关回归由构建脚本列出。
 

@@ -1801,6 +1801,8 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 	it("waits for a short OpenCode Go sibling credential before model fallback", async () => {
+		// Exercise sibling backoff without querying a real service with fixture keys.
+		vi.spyOn(opencodeGoUsageProvider, "fetchUsage").mockResolvedValue(null);
 		const exhaustedModel = getBundledModel("opencode-go", "deepseek-v4-flash");
 		const fallbackModel = getBundledModel("openai", "gpt-5.5");
 		if (!exhaustedModel || !fallbackModel) {
