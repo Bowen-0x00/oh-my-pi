@@ -83,7 +83,9 @@ describe("AgentSession retry delay cap", () => {
 
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-retry-cap-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"), {
+			usageProviderResolver: () => undefined,
+		});
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 

@@ -136,7 +136,7 @@ describe("AuthStorage credential block persistence", () => {
 		await firstStore.saveOAuth(PROVIDER, oauthCredential("2"));
 		await firstStore.saveOAuth(PROVIDER, oauthCredential("3"));
 		const rows = firstStore.listAuthCredentials(PROVIDER);
-		const firstStorage = new AuthStorage(firstStore);
+		const firstStorage = new AuthStorage(firstStore, { usageProviderResolver: () => undefined });
 		await firstStorage.credentials.reload();
 		try {
 			firstStorage.blocks.upsert({
@@ -156,7 +156,7 @@ describe("AuthStorage credential block persistence", () => {
 		}
 
 		const reopenedStore = await SqliteAuthCredentialStore.open(dbPath);
-		const reopenedStorage = new AuthStorage(reopenedStore);
+		const reopenedStorage = new AuthStorage(reopenedStore, { usageProviderResolver: () => undefined });
 		await reopenedStorage.credentials.reload();
 		try {
 			const fableKey = await reopenedStorage.keys.get(PROVIDER, "session-3", { modelId: "claude-fable-5" });
@@ -348,7 +348,7 @@ describe("AuthStorage credential block persistence", () => {
 		await store.saveOAuth(PROVIDER, oauthCredential("2"));
 		await store.saveOAuth(PROVIDER, oauthCredential("3"));
 		const rows = store.listAuthCredentials(PROVIDER);
-		const storage = new AuthStorage(store);
+		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
 		await storage.credentials.reload();
 		try {
 			storage.blocks.upsert({
@@ -366,7 +366,7 @@ describe("AuthStorage credential block persistence", () => {
 		disablingStore.close();
 
 		const reopenedStore = await SqliteAuthCredentialStore.open(dbPath);
-		const reopenedStorage = new AuthStorage(reopenedStore);
+		const reopenedStorage = new AuthStorage(reopenedStore, { usageProviderResolver: () => undefined });
 		await reopenedStorage.credentials.reload();
 		try {
 			const key = await reopenedStorage.keys.get(PROVIDER, "a");

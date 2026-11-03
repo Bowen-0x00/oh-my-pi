@@ -96,7 +96,10 @@ describe("credential pool visibility across processes", () => {
 	it("rotates onto an account another process added mid-session", async () => {
 		const rows = [oauthRow(1)];
 		const { store, commitExternally } = makeExternallyMutableStore(rows);
-		const storage = new AuthStorage(store, { configValueResolver: async value => value });
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => value,
+			usageProviderResolver: () => undefined,
+		});
 		storages.push(storage);
 		await storage.credentials.reload();
 
@@ -185,7 +188,10 @@ describe("credential pool visibility across processes", () => {
 	it("does not blame a sibling when another process deletes the pinned account", async () => {
 		const rows = [oauthRow(1), oauthRow(2)];
 		const { store, removeExternally, blocks } = makeExternallyMutableStore(rows);
-		const storage = new AuthStorage(store, { configValueResolver: async value => value });
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => value,
+			usageProviderResolver: () => undefined,
+		});
 		storages.push(storage);
 		await storage.credentials.reload();
 

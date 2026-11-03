@@ -3516,6 +3516,8 @@ describe("AuthStorage codex oauth ranking", () => {
 
 	test("skips expired access-token-only sticky credential and selects fresh sibling", async () => {
 		if (!authStorage) throw new Error("test setup failed");
+		// Keep the expired fixture unrefreshable without contacting a real OAuth server.
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockRejectedValue(new Error("temporary refresh failure"));
 		const sessionId = "sticky-token-only-session";
 		await authStorage.credentials.set("openai-codex", [
 			{ type: "oauth", ...createCredential("acct-k12", "k12@example.com") },
