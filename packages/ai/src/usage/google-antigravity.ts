@@ -1,4 +1,5 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
@@ -46,6 +47,7 @@ interface AntigravityModelInfo {
 
 interface AntigravityUsageResponse {
 	models: Record<string, AntigravityModelInfo>;
+	imageGenerationModelIds?: string[];
 }
 
 interface AntigravityQuotaSummaryBucket {
@@ -507,15 +509,11 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	if (summaryResult.response?.ok) {
 		const summaryData = (await summaryResult.response.json()) as AntigravityQuotaSummaryResponse;
 		summaryReport = buildQuotaSummaryReport(summaryData, params, summaryResult.endpoint, nowMs);
-		if (summaryReport && getAntigravityCounterLimits(summaryReport, "google-argon").length > 0) {
-			return summaryReport;
-		}
 	}
 
-	// Legacy deployments need the model-level parser. A summary without an
-	// Argon bucket can also be an Ultra account (shared Gemini quota) or an
-	// unavailable Argon roster: only the roster's explicit evidence can tell.
-	// Accounts already reporting an Argon meter never incur this extra probe.
+	// Quota buckets do not prove access to an exact model: accounts with shared
+	// Claude quota may serve 4.6 but not 5.5. Cache the roster with each usage
+	// report, including accounts whose summary already contains an Argon meter.
 	let legacyResult: AntigravityEndpointResult;
 	try {
 		legacyResult = await fetchAntigravityEndpoint({ ...endpointRequest, path: FETCH_AVAILABLE_MODELS_PATH }, ctx);
@@ -542,10 +540,32 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 	const legacyReport = buildLegacyUsageReport(data, params, successfulEndpoint, nowMs);
 	if (!summaryReport) return legacyReport;
-	// Never replace authoritative summary windows with ordinary legacy Gemini
-	// counters. Only supplement the missing, independently identified Argon meter.
-	summaryReport.limits.push(...getAntigravityCounterLimits(legacyReport, "google-argon"));
-	summaryReport.metadata = { ...summaryReport.metadata, argonEligible: legacyReport.metadata?.argonEligible };
+	// A summary weekly meter can remain funded while an Argon SKU reaches a
+	// separate short window or a stricter weekly cap. Keep those direct model
+	// gates too; ordinary legacy Gemini counters still cannot gate Argon.
+	const summaryArgonLimits = getAntigravityCounterLimits(summaryReport, "google-argon");
+	for (const limit of getAntigravityCounterLimits(legacyReport, "google-argon")) {
+		const alreadyReported = summaryArgonLimits.some(
+			summary =>
+				summary.window?.id === limit.window?.id &&
+				summary.window?.resetsAt === limit.window?.resetsAt &&
+				summary.amount.remainingFraction === limit.amount.remainingFraction,
+		);
+		if (!alreadyReported) {
+			summaryReport.limits.push({
+				...limit,
+				notes: ["Additional limit reported by the Argon model roster"],
+			});
+		}
+	}
+	summaryReport.limits.sort(
+		(left, right) => (left.amount.remainingFraction ?? 1) - (right.amount.remainingFraction ?? 1),
+	);
+	summaryReport.metadata = {
+		...summaryReport.metadata,
+		argonEligible: legacyReport.metadata?.argonEligible,
+		availableModelIds: legacyReport.metadata?.availableModelIds,
+	};
 	return summaryReport;
 }
 
@@ -574,12 +594,18 @@ function buildLegacyUsageReport(
 	>();
 	let argonEnabled = false;
 	let argonDisabled = false;
+	const hasModelRoster = data.models && typeof data.models === "object" && !Array.isArray(data.models);
+	const availableModelIds =
+		hasModelRoster || Array.isArray(data.imageGenerationModelIds) ? new Set<string>() : undefined;
 
 	for (const [modelId, modelInfo] of Object.entries(data.models ?? {})) {
 		const modelCounter = getAntigravityCounterKeyForModel(modelId);
 		if (modelCounter === "google-argon" && !modelInfo.isInternal) {
 			if (modelInfo.disabled === true) argonDisabled = true;
 			else argonEnabled = true;
+		}
+		if (modelInfo.disabled !== true && modelInfo.isInternal !== true) {
+			availableModelIds?.add(resolveVariantSelector(params.provider, modelId) ?? modelId);
 		}
 		if (modelInfo.disabled === true || modelInfo.isInternal === true) continue;
 		const quotaInfos = normalizeQuotaInfos(modelInfo);
@@ -643,6 +669,15 @@ function buildLegacyUsageReport(
 			});
 		}
 	}
+	// Image SKUs can live only in the roster's separate image list.
+	if (Array.isArray(data.imageGenerationModelIds)) {
+		for (const modelId of data.imageGenerationModelIds) {
+			if (typeof modelId !== "string") continue;
+			const modelInfo = data.models?.[modelId];
+			if (modelInfo?.disabled === true || modelInfo?.isInternal === true) continue;
+			availableModelIds?.add(resolveVariantSelector(params.provider, modelId) ?? modelId);
+		}
+	}
 
 	// Autocomplete models (`tab_*`, internal `chat_*`) report a bare
 	// `{ remainingFraction: 1 }` with no reset time on the Google counter. When
@@ -689,6 +724,7 @@ function buildLegacyUsageReport(
 		// An enabled roster row proves access, not quota. Missing rows prove
 		// neither; an explicit disabled-only roster proves unavailability.
 		argonEligible: argonEnabled ? true : argonDisabled ? false : undefined,
+		availableModelIds: availableModelIds ? [...availableModelIds] : undefined,
 	};
 	if (credential.email) metadata.email = credential.email;
 	if (credential.accountId) metadata.accountId = credential.accountId;
@@ -706,7 +742,7 @@ function buildLegacyUsageReport(
 
 export const antigravityUsageProvider: UsageProvider = {
 	id: "google-antigravity",
-	cacheVersion: 3,
+	cacheVersion: 5,
 	fetchUsage: fetchAntigravityUsage,
 	supports: params => params.provider === "google-antigravity",
 };
@@ -763,8 +799,16 @@ function rankAntigravityLimits(report: UsageReport, context: CredentialRankingCo
  */
 export const antigravityRankingStrategy: CredentialRankingStrategy = {
 	modelAvailability(context) {
-		if (getAntigravityCounterKeyForModel(context.modelId) !== "google-argon") return undefined;
+		if (!context.modelId) return undefined;
+		const modelId = resolveVariantSelector("google-antigravity", context.modelId) ?? context.modelId;
+		const isArgon = getAntigravityCounterKeyForModel(context.modelId) === "google-argon";
 		return report => {
+			const availableModelIds = report?.metadata?.availableModelIds;
+			if (Array.isArray(availableModelIds) && availableModelIds.every(id => typeof id === "string")) {
+				return availableModelIds.includes(modelId);
+			}
+			// Older reports without a roster can prove only the dedicated Argon SKU.
+			if (!isArgon) return undefined;
 			const eligible = report?.metadata?.argonEligible;
 			if (typeof eligible === "boolean") return eligible;
 			// A dedicated measured quota proves access, not headroom, even when

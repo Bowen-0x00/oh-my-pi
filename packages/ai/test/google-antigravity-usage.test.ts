@@ -76,7 +76,6 @@ function makeApiModel(
 
 describe("antigravity usage provider", () => {
 	it("reports the official five-hour and weekly quota summary", async () => {
-		const requestedUrls: string[] = [];
 		const summary = {
 			groups: [
 				{
@@ -126,13 +125,7 @@ describe("antigravity usage provider", () => {
 				},
 			],
 		};
-		const fetchImpl: FetchImpl = async input => {
-			requestedUrls.push(String(input));
-			return new Response(JSON.stringify(summary), {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			});
-		};
+		const fetchImpl = fakeFetch(summary);
 
 		const report = await antigravityUsageProvider.fetchUsage!(
 			{
@@ -143,7 +136,6 @@ describe("antigravity usage provider", () => {
 			makeCtx(fetchImpl),
 		);
 
-		expect(requestedUrls).toEqual(["https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"]);
 		expect(report?.limits).toHaveLength(7);
 
 		const googleLimits = scopeAntigravityLimitsForModel(report!, { modelId: "gemini-3.8-flash" });
@@ -237,7 +229,7 @@ describe("antigravity usage provider", () => {
 	it.each([
 		{ models: { "gemini-4-argon-disabled": { disabled: true } }, eligible: false },
 		{ models: { "gemini-4-argon-low": {} }, eligible: true },
-		{ models: {}, eligible: undefined },
+		{ models: {}, eligible: false },
 	])("supplements an Argon-less summary using explicit roster evidence: $eligible", async ({ models, eligible }) => {
 		const requestedUrls: string[] = [];
 		const fetchImpl: FetchImpl = async input => {
@@ -291,6 +283,85 @@ describe("antigravity usage provider", () => {
 		).toBe(0.8);
 		expect(scopeAntigravityLimitsForModel(report!, { modelId: "gemini-4-argon" })[0]?.amount.remainingFraction).toBe(
 			0.4,
+		);
+	});
+
+	it("honors an exhausted Argon high short window despite a full weekly summary", async () => {
+		const resetTime = new Date(Date.now() + 3600_000).toISOString();
+		let shortWindowRestored = false;
+		const fetchImpl: FetchImpl = async input =>
+			Response.json(
+				String(input).endsWith(":retrieveUserQuotaSummary")
+					? {
+							buckets: [
+								{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: 1 },
+								{ bucketId: "gemini-5h", window: "5h", remainingFraction: 0 },
+							],
+						}
+					: {
+							models: {
+								"gemini-4-argon-low": { quotaInfo: { remainingFraction: 1, windowId: "weekly" } },
+								"gemini-4-argon-high": {
+									quotaInfo: {
+										resetTime,
+										windowId: "5h",
+										...(shortWindowRestored ? { remainingFraction: 0.6 } : {}),
+									},
+								},
+							},
+						},
+			);
+		const params = { provider: "google-antigravity", credential: makeCredential() };
+		const blocked = await antigravityUsageProvider.fetchUsage!(params, makeCtx(fetchImpl));
+		if (!blocked) throw new Error("Expected quota report");
+		const context = { modelId: "gemini-4-argon" };
+		const primary = antigravityRankingStrategy.findWindowLimits(blocked, context).primary;
+		expect(primary?.status).toBe("exhausted");
+		expect(primary?.window?.resetsAt).toBe(Date.parse(resetTime));
+		expect(
+			antigravityRankingStrategy
+				.healableBlockScopes?.(blocked)
+				.find(scope => scope.blockScope === "counter:google-argon")?.healthy,
+		).toBeFalse();
+
+		shortWindowRestored = true;
+		const restored = await antigravityUsageProvider.fetchUsage!(params, makeCtx(fetchImpl));
+		if (!restored) throw new Error("Expected restored quota report");
+		expect(antigravityRankingStrategy.findWindowLimits(restored, context).primary?.amount.remainingFraction).toBe(
+			0.6,
+		);
+		expect(
+			antigravityRankingStrategy
+				.healableBlockScopes?.(restored)
+				.find(scope => scope.blockScope === "counter:google-argon")?.healthy,
+		).toBeTrue();
+		// An unrelated ordinary Gemini cap cannot keep the Argon block alive.
+		expect(scopeAntigravityLimitsForModel(restored, { modelId: "gemini-3.8-flash" })[0]?.status).toBe("exhausted");
+	});
+
+	it("ranks by a stricter model-reported Argon weekly gate without replacing its summary meter", async () => {
+		const fetchImpl: FetchImpl = async input =>
+			Response.json(
+				String(input).endsWith(":retrieveUserQuotaSummary")
+					? { buckets: [{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: 1 }] }
+					: {
+							models: {
+								"gemini-4-argon-low": { quotaInfo: { remainingFraction: 1, windowId: "weekly" } },
+								"gemini-4-argon-high": { quotaInfo: { remainingFraction: 0.06, windowId: "weekly" } },
+							},
+						},
+			);
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential() },
+			makeCtx(fetchImpl),
+		);
+		if (!report) throw new Error("Expected quota report");
+		expect(
+			antigravityRankingStrategy.findWindowLimits(report, { modelId: "gemini-4-argon" }).primary?.amount
+				.remainingFraction,
+		).toBe(0.06);
+		expect(report.limits.find(limit => limit.id.endsWith(":gemini-argon-wtu-weekly"))?.amount.remainingFraction).toBe(
+			1,
 		);
 	});
 
@@ -654,6 +725,40 @@ describe("antigravity usage provider", () => {
 		);
 		expect(report).toBeNull();
 	});
+
+	it("keeps exact model entitlement separate from quota even when summary reports funded Argon", async () => {
+		const fetchImpl: FetchImpl = async input =>
+			Response.json(
+				String(input).endsWith(":retrieveUserQuotaSummary")
+					? {
+							buckets: [
+								{ bucketId: "3p-weekly", window: "weekly", remainingFraction: 1 },
+								{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: 1 },
+							],
+						}
+					: {
+							models: {
+								"claude-opus-4-6": {},
+								"claude-opus-5-5-high": { disabled: true },
+								"gemini-3.8-flash-high": {},
+								"gpt-oss-120b": { isInternal: true },
+							},
+							imageGenerationModelIds: ["gemini-3-pro-image"],
+						},
+			);
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential() },
+			makeCtx(fetchImpl),
+		);
+		expect(antigravityRankingStrategy.modelAvailability?.({ modelId: "claude-opus-4-6" })?.(report!)).toBeTrue();
+		expect(antigravityRankingStrategy.modelAvailability?.({ modelId: "claude-opus-5-5" })?.(report!)).toBeFalse();
+		expect(antigravityRankingStrategy.modelAvailability?.({ modelId: "gemini-3.8-flash" })?.(report!)).toBeTrue();
+		expect(antigravityRankingStrategy.modelAvailability?.({ modelId: "gpt-oss-120b" })?.(report!)).toBeFalse();
+		expect(antigravityRankingStrategy.modelAvailability?.({ modelId: "gemini-3-pro-image" })?.(report!)).toBeTrue();
+		expect(scopeAntigravityLimitsForModel(report!, { modelId: "claude-opus-5-5" })[0]?.amount.remainingFraction).toBe(
+			1,
+		);
+	});
 });
 
 describe("antigravity ranking strategy", () => {
@@ -719,9 +824,7 @@ describe("antigravity ranking strategy", () => {
 	);
 
 	it("does not infer plan permission from a present but unmeasured Argon bucket", async () => {
-		let calls = 0;
 		const fetchImpl: FetchImpl = async () => {
-			calls += 1;
 			return new Response(
 				JSON.stringify({
 					buckets: [{ bucketId: "gemini-argon-wtu-weekly", window: "weekly" }],
@@ -733,7 +836,6 @@ describe("antigravity ranking strategy", () => {
 			{ provider: "google-antigravity", credential: makeCredential() },
 			makeCtx(fetchImpl),
 		);
-		expect(calls).toBe(1);
 		expect(report?.limits[0]?.status).toBe("unknown");
 		expect(antigravityRankingStrategy.modelAvailability?.({ modelId: "gemini-4-argon" })?.(report!)).toBeUndefined();
 		expect(antigravityRankingStrategy.healableBlockScopes?.(report!)[0]?.healthy).toBeFalse();

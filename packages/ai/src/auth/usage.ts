@@ -49,12 +49,12 @@ import {
 
 /** Convert an OAuth usage credential into a refreshable stored shape; used by probes and health. */
 export function buildRefreshableOauthCredential(credential: UsageCredential): OAuthCredential | null {
-	if (!credential.accessToken || !credential.refreshToken || credential.expiresAt === undefined) {
+	if (!credential.refreshToken || credential.expiresAt === undefined) {
 		return null;
 	}
 	return {
 		type: "oauth",
-		access: credential.accessToken,
+		access: credential.accessToken ?? "",
 		refresh: credential.refreshToken,
 		expires: credential.expiresAt,
 		accountId: credential.accountId,

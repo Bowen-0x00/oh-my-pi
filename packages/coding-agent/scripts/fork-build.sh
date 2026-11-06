@@ -109,6 +109,7 @@ done
 	packages/ai/test/auth-storage-block-persistence.test.ts \
 	packages/ai/test/auth-storage-model-usage-health.test.ts \
 	packages/ai/test/auth-storage-usage-cache.test.ts \
+	packages/ai/test/auth-storage-refresh-only-usage.test.ts \
 	packages/ai/test/credential-external-reload.test.ts \
 	packages/ai/test/rate-limit-utils.test.ts \
 	packages/ai/test/auth-storage-oauth-account-select.test.ts \

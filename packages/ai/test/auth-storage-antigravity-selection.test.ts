@@ -18,6 +18,7 @@ import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { antigravityUsageProvider } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -73,6 +74,7 @@ function createAntigravityReport(args: {
 	accountId: string;
 	windows: AntigravityWindowSpec[];
 	argonEligible?: boolean;
+	availableModelIds?: string[];
 }): UsageReport {
 	// fetchAntigravityUsage sorts ascending by remainingFraction; mirror
 	// that here so the strategy sees the same shape it would in production.
@@ -83,7 +85,12 @@ function createAntigravityReport(args: {
 		provider: "google-antigravity",
 		fetchedAt: Date.now(),
 		limits,
-		metadata: { accountId: args.accountId, projectId: args.projectId, argonEligible: args.argonEligible },
+		metadata: {
+			accountId: args.accountId,
+			projectId: args.projectId,
+			argonEligible: args.argonEligible,
+			availableModelIds: args.availableModelIds,
+		},
 	};
 }
 
@@ -673,6 +680,244 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 			).toBe(firstKey);
 		} finally {
 			peerStore.close();
+		}
+	});
+
+	test.each([
+		["gemini-4-argon", "google-argon"],
+		["gemini-3.8-flash", "google"],
+		["claude-opus-5-5", "anthropic"],
+		["gpt-oss-120b", "openai"],
+	] as const)("switches %s to an externally added funded account despite a stale roster", async (modelId, counter) => {
+		if (!authStorage || !store?.getCredentialBlock) throw new Error("test setup failed");
+		const provider = "google-antigravity";
+		const sessionId = "added-after-discovery";
+		const options = { modelId, accountIds: ["acct-old"] };
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", ...createCredential("acct-old", "proj-old", "old@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-old",
+			createAntigravityReport({
+				accountId: "acct-old",
+				projectId: "proj-old",
+				windows: [{ counter, usedFraction: 1, resetInMs: 80 * HOUR_MS }],
+			}),
+		);
+		const oldRow = store.listAuthCredentials(provider)[0];
+		if (!oldRow) throw new Error("expected old credential row");
+		expect(await authStorage.keys.get(provider, sessionId, options)).toBe("api-acct-old");
+		// A single-account session can skip usage preflight until a real 429.
+		await authStorage.limits.markReached(provider, sessionId, {
+			modelId,
+			retryAfterMs: 80 * HOUR_MS,
+			providerTimed: true,
+		});
+		const blockScope = `counter:${counter}`;
+		const blockedUntil = store.getCredentialBlock(oldRow.id, "google-antigravity:oauth", blockScope);
+		expect(blockedUntil).toBeGreaterThan(Date.now());
+
+		// Both the running storage and model roster predate a sibling login.
+		const peerStore = await SqliteAuthCredentialStore.open(dbPath);
+		try {
+			await peerStore.saveOAuth(provider, createCredential("acct-added", "proj-added", "added@example.com"));
+		} finally {
+			peerStore.close();
+		}
+		usageByAccount.set(
+			"acct-added",
+			createAntigravityReport({
+				accountId: "acct-added",
+				projectId: "proj-added",
+				windows: [{ counter, usedFraction: 0, resetInMs: 7 * 24 * HOUR_MS }],
+				availableModelIds: [modelId],
+			}),
+		);
+
+		expect(await authStorage.keys.get(provider, sessionId, options)).toBe("api-acct-added");
+		expect(store.getCredentialBlock(oldRow.id, "google-antigravity:oauth", blockScope)).toBe(blockedUntil);
+	});
+
+	test.each([
+		["unknown", "api-acct-listed"],
+		["disabled", "api-acct-listed"],
+	] as const)(
+		"does not bypass discovery for unverified or disabled Argon access (%s)",
+		async (access, expectedKey) => {
+			if (!authStorage) throw new Error("test setup failed");
+			await authStorage.credentials.set("google-antigravity", [
+				{ type: "oauth", ...createCredential("acct-listed", "proj-listed", "listed@example.com") },
+				{ type: "oauth", ...createCredential("acct-unlisted", "proj-unlisted", "unlisted@example.com") },
+			]);
+			usageByAccount.set(
+				"acct-listed",
+				createAntigravityReport({
+					accountId: "acct-listed",
+					projectId: "proj-listed",
+					windows: [{ counter: "google-argon", usedFraction: 1, resetInMs: 80 * HOUR_MS }],
+				}),
+			);
+			usageByAccount.set(
+				"acct-unlisted",
+				createAntigravityReport({
+					accountId: "acct-unlisted",
+					projectId: "proj-unlisted",
+					argonEligible: access === "disabled" ? false : undefined,
+					windows: [
+						{ counter: access === "disabled" ? "google-argon" : "google", usedFraction: 0, resetInMs: HOUR_MS },
+					],
+				}),
+			);
+			expect(
+				await authStorage.keys.get("google-antigravity", `argon-unlisted-${access}`, {
+					modelId: "gemini-4-argon",
+					accountIds: ["acct-listed"],
+				}),
+			).toBe(expectedKey);
+		},
+	);
+
+	test("stale Claude discovery never widens an explicit session account pool", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "google-antigravity";
+		const sessionId = "restricted-claude-pool";
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", ...createCredential("acct-permitted", "proj-permitted", "permitted@example.com") },
+			{ type: "oauth", ...createCredential("acct-outside", "proj-outside", "outside@example.com") },
+		]);
+		for (const [accountId, usedFraction] of [
+			["acct-permitted", 1],
+			["acct-outside", 0],
+		] as const) {
+			usageByAccount.set(
+				accountId,
+				createAntigravityReport({
+					accountId,
+					projectId: `proj-${accountId}`,
+					windows: [{ counter: "anthropic", usedFraction, resetInMs: HOUR_MS }],
+				}),
+			);
+		}
+		const lease = authStorage.sessions.restrict(provider, sessionId, ["account:acct-permitted"]);
+		try {
+			expect(
+				await authStorage.keys.get(provider, sessionId, {
+					modelId: "claude-opus-5-5",
+					accountIds: ["acct-permitted"],
+				}),
+			).toBe("api-acct-permitted");
+		} finally {
+			authStorage.sessions.unrestrict(provider, sessionId, lease);
+		}
+	});
+
+	test("never selects an unsupported Opus revision merely because shared quota remains", async () => {
+		if (!store) throw new Error("test setup failed");
+		const provider = "google-antigravity";
+		let addedEnabled = true;
+		const checkedStorage = new AuthStorage(store, {
+			usageProviderResolver: p => (p === provider ? antigravityUsageProvider : undefined),
+			usageFetch: Object.assign(
+				async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+					const bearer = new Headers(init?.headers).get("authorization") ?? "";
+					const old = bearer.includes("acct-listed");
+					const unsupported = bearer.includes("acct-unsupported");
+					if (String(input).endsWith(":retrieveUserQuotaSummary")) {
+						return Response.json({
+							buckets: [
+								{ bucketId: "3p-weekly", window: "weekly", remainingFraction: old ? 0 : unsupported ? 1 : 0.4 },
+								{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: 1 },
+							],
+						});
+					}
+					return Response.json({
+						models: unsupported
+							? { "claude-opus-4-6": {} }
+							: { "claude-opus-5-5-high": { disabled: !old && !addedEnabled } },
+					});
+				},
+				{ preconnect: fetch.preconnect },
+			),
+		});
+		try {
+			await checkedStorage.credentials.set(provider, [
+				{ type: "oauth", ...createCredential("acct-listed", "proj-listed", "listed@example.com") },
+				{ type: "oauth", ...createCredential("acct-unsupported", "proj-unsupported", "unsupported@example.com") },
+				{ type: "oauth", ...createCredential("acct-added", "proj-added", "added@example.com") },
+			]);
+			const options = { modelId: "claude-opus-5-5", accountIds: ["acct-listed"] };
+			expect(await checkedStorage.keys.get(provider, "exact-opus-access", options)).toBe("api-acct-added");
+
+			// Once the newly eligible seat loses access, last-resort selection must
+			// retain quota failure semantics, not send 5.5 through a 4.6-only seat.
+			addedEnabled = false;
+			await checkedStorage.usage.invalidate(provider);
+			expect(await checkedStorage.keys.get(provider, "exact-opus-access", options)).toBe("api-acct-listed");
+		} finally {
+			checkedStorage.close();
+			store = null;
+		}
+	});
+
+	test("keeps a real Argon cooldown and switches siblings when only the high short window is exhausted", async () => {
+		if (!store?.getCredentialBlock) throw new Error("test setup failed");
+		const provider = "google-antigravity";
+		const resetTime = new Date(Date.now() + HOUR_MS).toISOString();
+		const checkedStorage = new AuthStorage(store, {
+			usageProviderResolver: p => (p === provider ? antigravityUsageProvider : undefined),
+			usageFetch: Object.assign(
+				async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+					const old = new Headers(init?.headers).get("authorization")?.includes("acct-short-spent");
+					if (String(input).endsWith(":retrieveUserQuotaSummary")) {
+						return Response.json({
+							buckets: [{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: 1 }],
+						});
+					}
+					return Response.json({
+						models: {
+							"gemini-4-argon-low": { quotaInfo: { remainingFraction: 1, windowId: "weekly" } },
+							"gemini-4-argon-high": {
+								quotaInfo: {
+									windowId: "5h",
+									resetTime,
+									...(old ? {} : { remainingFraction: 0.5 }),
+								},
+							},
+						},
+					});
+				},
+				{ preconnect: fetch.preconnect },
+			),
+		});
+		try {
+			await checkedStorage.credentials.set(provider, [
+				{ type: "oauth", ...createCredential("acct-short-spent", "proj-old", "old@example.com") },
+				{ type: "oauth", ...createCredential("acct-short-funded", "proj-new", "new@example.com") },
+			]);
+			const old = store.listAuthCredentials(provider)[0];
+			if (!old) throw new Error("expected old credential");
+			const blockedUntilMs = Date.parse(resetTime);
+			checkedStorage.blocks.upsert({
+				credentialId: old.id,
+				providerKey: "google-antigravity:oauth",
+				blockScope: "counter:google-argon",
+				blockedUntilMs,
+			});
+			ageCredentialBlockRows(dbPath);
+			checkedStorage.sessions.pin(provider, "argon-high-cooldown", old.id);
+			await checkedStorage.usage.reports({ provider });
+			expect(store.getCredentialBlock(old.id, "google-antigravity:oauth", "counter:google-argon")).toBe(
+				blockedUntilMs,
+			);
+			expect(
+				await checkedStorage.keys.get(provider, "argon-high-cooldown", {
+					modelId: "gemini-4-argon",
+					accountIds: ["acct-short-spent"],
+				}),
+			).toBe("api-acct-short-funded");
+		} finally {
+			checkedStorage.close();
+			store = null;
 		}
 	});
 });

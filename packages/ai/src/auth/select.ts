@@ -616,6 +616,7 @@ export class CredentialSelector {
 		// Reads honour every scope that applies; the scalar above is for args that persist.
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const planGate = strategy?.planGate?.(rankingContext);
+		const modelAvailability = strategy?.modelAvailability?.(rankingContext);
 		const hasPlanRequirement = planGate !== undefined;
 		const accountIds = options?.accountIds?.length ? new Set(options.accountIds) : undefined;
 		const enforceAccounts =
@@ -631,7 +632,7 @@ export class CredentialSelector {
 			provider,
 			credentials,
 			strategy,
-			hasPlanRequirement || strategy?.modelAvailability?.(rankingContext) !== undefined,
+			hasPlanRequirement || modelAvailability !== undefined,
 		);
 		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
@@ -974,10 +975,8 @@ export class CredentialSelector {
 			allowBlocked: boolean;
 			enforcePlanRequirement: boolean;
 			enforceAccounts: boolean;
-		}> = [
-			{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
-			{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
-		];
+		}> = [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
+		passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
 		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
 		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
 		// Blocked candidates rank earliest-unblock first, which would route a
@@ -991,8 +990,17 @@ export class CredentialSelector {
 			for (const candidate of pass.allowBlocked ? lastResortCandidates : candidates) {
 				if (preflightFailures.has(candidate)) continue;
 				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
-				if (pass.enforceAccounts && (candidateAccountKey === undefined || !accountIds?.has(candidateAccountKey)))
-					continue;
+				if (pass.enforceAccounts && (candidateAccountKey === undefined || !accountIds?.has(candidateAccountKey))) {
+					// A checked provider report can prove access for an account added
+					// after the model roster was cached. Never relax explicit session
+					// restrictions or admit blocked/unverified out-of-roster accounts.
+					const confirmedByUsage =
+						!pass.allowBlocked &&
+						candidate.usageChecked === true &&
+						candidate.usage !== null &&
+						modelAvailability?.(candidate.usage) === true;
+					if (!confirmedByUsage) continue;
+				}
 				const resolved = await this.tryOAuth(provider, candidate.selection, providerKey, sessionId, options, {
 					checkUsage,
 					allowBlocked: pass.allowBlocked,

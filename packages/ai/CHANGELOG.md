@@ -4,7 +4,12 @@
 
 ### Fixed
 
+- Fixed usage reports for imported OAuth accounts that have a refresh token but have not yet obtained their first access token.
 - Fixed Google Antigravity account selection and cooldowns to use Gemini 4 Argon's own quota, prefer measured Argon headroom, and skip accounts whose roster explicitly disables Argon.
+- Fixed resumed Argon sessions retrying an exhausted account after funded accounts were added: checked model-availability reports now admit new accounts missing from a stale discovery roster, without relaxing explicit account-pool restrictions.
+- Fixed Antigravity 404s after quota-based account switching: cached usage reports now include each account's exact enabled model roster, so shared Claude/GPT quota cannot authorize an unsupported model revision. Newly supported accounts can bypass stale discovery lists only with checked entitlement; unavailable accounts remain excluded even in last-resort selection.
+- Fixed Argon quota reports dropping model-specific short-window or stricter weekly limits when the weekly summary still showed balance; these gates now participate in account ranking and prevent premature cooldown recovery.
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
