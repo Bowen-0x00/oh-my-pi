@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
+### Added
+
+- Added shell trace visualization: `ShellTrace` model and TSP `shell` kind for shell runs, node state, and layout.
+- Code views gain score-based line shading, labeled collapsible folds with notes, tones, and hover cards, and an overview strip.
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

@@ -485,7 +485,11 @@ export interface ModelUsageHealthOptions {
 export type AuthApiKeyOptions = {
 	baseUrl?: string;
 	modelId?: string;
-	/** {@link oauthAccountKey}s known to serve `modelId` from discovery. A checked provider roster may independently prove access for an unlisted account; otherwise discovery remains preferred. */
+	/**
+	 * {@link oauthAccountKey}s known to serve `modelId` from discovery.
+	 * Unblocked matches win, then other unblocked plan-eligible accounts, before blocked fallbacks.
+	 * A checked provider roster may independently prove access for an unlisted account; otherwise discovery remains preferred.
+	 */
 	accountIds?: readonly string[];
 	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
