@@ -22,6 +22,7 @@ import {
 	type ApiKeyResolver,
 	createAuthRetryKeyState,
 	isApiKeyResolver,
+	preferAuthRetryError,
 	resolvedApiKeyBearer,
 	resolveNextAuthRetryKey,
 } from "./auth-retry";
@@ -1377,6 +1378,7 @@ function streamSimpleRequest<TApi extends Api>(
 					resolved,
 				);
 				if (!failure) return;
+				let reportedFailure = failure;
 				while (true) {
 					// Never resolve another credential or replay output after cancellation.
 					if (signal?.aborted) break;
@@ -1399,9 +1401,13 @@ function streamSimpleRequest<TApi extends Api>(
 						nextResolved,
 					);
 					if (!next) return;
+					reportedFailure =
+						preferAuthRetryError(reportedFailure.error, next.error) === reportedFailure.error
+							? reportedFailure
+							: next;
 					failure = next;
 				}
-				await emitFailure(failure);
+				await emitFailure(reportedFailure);
 			} catch (error) {
 				await releaseLease();
 				outer.fail(error);
