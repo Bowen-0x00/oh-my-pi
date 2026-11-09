@@ -364,12 +364,11 @@ async function runPrintModeCore(
 			event.type === "notice" &&
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||
 				event.source === COST_GATE_NOTICE_SOURCE ||
-				event.source === HINDSIGHT_NOTICE_SOURCE)
+				event.source === HINDSIGHT_NOTICE_SOURCE ||
+				event.source === "provider-request")
 		) {
-			// Text mode renders no session notices, but an automatic sign-out must not stay
-			// hidden behind a sibling account that quietly answers the prompt, a run must
-			// say when it crossed its cost thresholds, and a memory failure must not pass
-			// as an answer that used memories.
+			// Account contention, automatic sign-outs, cost thresholds and memory failures
+			// must stay visible even in text mode, without contaminating the answer on stdout.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
 		} else if (event.type === "auto_retry_start") {
 			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying

@@ -32,6 +32,8 @@ export interface ApiKeyResolveContext {
 	previousKey?: string;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
+	/** Live streaming request reservation; absent for probes and non-streaming resolves. */
+	accountRequestId?: string;
 }
 
 /**
@@ -57,6 +59,10 @@ export interface ResolvedApiKey {
 	afterSiblingWait?: boolean;
 	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */
 	oauthIdentity?: OAuthRequestIdentity;
+	/** This request shares an account already serving another live request. */
+	accountBusy?: boolean;
+	/** Pinned or refresh-bound requests describe their selected account, not the automatic pool. */
+	accountBusyReason?: "all-busy" | "pinned";
 }
 
 export type ApiKeyResolution = string | ResolvedApiKey | undefined;
@@ -151,11 +157,18 @@ export async function resolveApiKeyOnce(
  * Callers that preflight credentials can pass the returned resolver to the
  * auth-retry driver without making the driver know about that preflight: the
  * first initial resolution reuses `seed` (including its credential identity),
- * and all later resolutions delegate to `resolver`.
+ * unless a live account reservation requires a fresh, atomic selection.
+ * All later resolutions delegate to `resolver`.
  */
 export function seedApiKeyResolver(seed: ApiKeyResolution, resolver: ApiKeyResolver): ApiKeyResolver {
 	let seedPending = resolvedApiKeyBearer(seed) !== undefined;
 	return ctx => {
+		if (ctx.accountRequestId !== undefined) {
+			// Availability probes do not own account slots. A preflight seed
+			// cannot bypass the live request's idle-account selection.
+			seedPending = false;
+			return resolver(ctx);
+		}
 		if (seedPending && ctx.error === undefined) {
 			seedPending = false;
 			return seed;

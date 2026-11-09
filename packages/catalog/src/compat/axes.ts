@@ -478,6 +478,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: [true, false],
 	},
+	/** Prefer idle OAuth accounts across local processes before sharing a busy account. */
+	"account-load-balancing": {
+		key: "accountLoadBalancing",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },

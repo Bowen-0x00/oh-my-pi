@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Prefer idle Antigravity OAuth accounts across local omp processes while preserving quota and account-pool restrictions; when every eligible account is busy, requests still proceed with a busy-account warning.
+- Fixed Gemini CLI and Antigravity requests hanging after metadata-only stream events and skipping fallback endpoints after first-response timeouts.
 - Fixed usage reports for imported OAuth accounts that have a refresh token but have not yet obtained their first access token.
 - Fixed Google Antigravity account selection and cooldowns to use Gemini 4 Argon's own quota, prefer measured Argon headroom, and skip accounts whose roster explicitly disables Argon.
 - Fixed resumed Argon sessions retrying an exhausted account after funded accounts were added: checked model-availability reports now admit new accounts missing from a stale discovery roster, without relaxing explicit account-pool restrictions.

@@ -3746,6 +3746,7 @@ export class ModelRegistry {
 			refreshReason: options?.refreshReason,
 			rejectedAccessToken: options?.rejectedAccessToken,
 			signal: options?.signal,
+			accountRequestId: options?.accountRequestId,
 		});
 	}
 

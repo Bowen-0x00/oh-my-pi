@@ -8,6 +8,7 @@ import { isWithinUsageReserve } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
 import { raceSignal } from "./abort";
+import { accountLoadCoordinator } from "./account-load";
 import {
 	AUTH_BLOCK_SCOPE,
 	credentialBlockScopesForRequest,
@@ -29,6 +30,7 @@ import {
 	type UsageRankingResult,
 } from "./rank";
 import { mergeRefreshedCredential, OAUTH_REFRESH_SKEW_MS, type OAuthRefresher } from "./refresh";
+import { resolveCredentialIdentityKey } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
 import {
 	type ApiKeyCredential,
@@ -52,7 +54,13 @@ import {
 export const OAUTH_REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
 
 /** OAuth bearer and credential chosen for a request, with its durable row id when available. */
-export type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
+export type OAuthResolutionResult = {
+	apiKey: string;
+	credential: OAuthCredential;
+	credentialId?: number;
+	accountBusy?: boolean;
+	accountBusyReason?: "all-busy" | "pinned";
+};
 
 /** Options for CredentialSelector.tryOAuth when evaluating one OAuth credential. */
 export type TryOAuthOptions = {
@@ -795,13 +803,26 @@ export class CredentialSelector {
 			const [preferred] = candidates.splice(sessionPreferredCandidate, 1);
 			candidates.unshift(preferred);
 		}
-		// Step (b) of the auth-retry policy: when `forceRefresh` is set, re-mint
-		// the session-preferred credential (or the first candidate when no
-		// session preference exists yet) even if its cached token still looks
-		// valid — a peer/broker may have rotated it out from under us.
-		const forceRefreshIndex = options?.forceRefresh
-			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
+		// A concurrent turn can move the session pin after this request selected
+		// its account. Refresh the failed bearer, not that newer shared pin.
+		const rejectedAccess =
+			options?.forceRefresh && options.accountRequestId ? options.rejectedAccessToken : undefined;
+		const rejectedCredentialId = rejectedAccess ? this.#deps.pool.idForBearer(provider, rejectedAccess) : undefined;
+		const rejectedSelection = rejectedAccess
+			? candidates.find(
+					candidate =>
+						candidate.selection.credential.access === rejectedAccess ||
+						(rejectedCredentialId !== undefined &&
+							credentialIds[candidate.selection.index] === rejectedCredentialId),
+				)
 			: undefined;
+		const forceRefreshIndex = options?.forceRefresh
+			? (rejectedSelection?.selection.index ?? sessionPreferredIndex ?? candidates[0]?.selection.index)
+			: undefined;
+		const forceRefreshCandidate =
+			forceRefreshIndex === undefined
+				? undefined
+				: candidates.find(candidate => candidate.selection.index === forceRefreshIndex);
 		// Candidate IDs were captured before ranking. Their synchronous rebinds
 		// share one provider re-list; resyncs after refresh await re-read the store.
 		let preflightRows: StoredAuthCredential[] | undefined;
@@ -970,6 +991,13 @@ export class CredentialSelector {
 				candidates.unshift(preferred);
 			}
 		}
+		if (options?.accountRequestId && forceRefreshCandidate) {
+			const forcePosition = candidates.indexOf(forceRefreshCandidate);
+			if (forcePosition > 0) {
+				candidates.splice(forcePosition, 1);
+				candidates.unshift(forceRefreshCandidate);
+			}
+		}
 
 		const passes: Array<{
 			allowBlocked: boolean;
@@ -991,7 +1019,27 @@ export class CredentialSelector {
 			? [explicitPin, ...candidates.filter(candidate => candidate !== explicitPin)]
 			: candidates;
 
+		const accountRequestId = options?.accountRequestId;
+		const selectionOptions = accountRequestId ? { ...options, recordAffinity: false } : options;
+		const finishSelection = (resolved: OAuthResolutionResult, candidate: OAuthCandidate): OAuthResolutionResult => {
+			if (options?.recordAffinity !== false) {
+				const index =
+					resolved.credentialId === undefined
+						? candidate.selection.index
+						: this.#deps.pool.entries(provider).findIndex(entry => entry.id === resolved.credentialId);
+				if (index !== -1) this.#deps.affinity.record(provider, sessionId, "oauth", index);
+			}
+			return resolved;
+		};
+		const reserveAccount = (resolved: OAuthResolutionResult, allowBusy: boolean) => {
+			if (!accountRequestId) return undefined;
+			const identityKey =
+				resolveCredentialIdentityKey(provider, resolved.credential) ??
+				`oauth:${resolved.credential.refresh || resolved.credential.access}`;
+			return accountLoadCoordinator.reserve(provider, accountRequestId, identityKey, allowBusy);
+		};
 		for (const pass of passes) {
+			let busyCandidate: { resolved: OAuthResolutionResult; candidate: OAuthCandidate } | undefined;
 			for (const candidate of pass.allowBlocked ? lastResortCandidates : candidates) {
 				if (preflightFailures.has(candidate)) continue;
 				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
@@ -1006,20 +1054,51 @@ export class CredentialSelector {
 						modelAvailability?.(candidate.usage) === true;
 					if (!confirmedByUsage) continue;
 				}
-				const resolved = await this.tryOAuth(provider, candidate.selection, providerKey, sessionId, options, {
-					checkUsage,
-					allowBlocked: pass.allowBlocked,
-					prefetchedUsage: candidate.usage,
-					usagePrechecked: candidate.usageChecked,
-					planGate,
-					enforcePlanRequirement: pass.enforcePlanRequirement,
-					strategy,
-					rankingContext,
-					blockScope,
-					blockScopes,
-					onTransientRefreshFailure: recordTransientRefreshFailure,
-				});
-				if (resolved) return resolved;
+				const resolved = await this.tryOAuth(
+					provider,
+					candidate.selection,
+					providerKey,
+					sessionId,
+					selectionOptions,
+					{
+						checkUsage,
+						allowBlocked: pass.allowBlocked,
+						prefetchedUsage: candidate.usage,
+						usagePrechecked: candidate.usageChecked,
+						planGate,
+						enforcePlanRequirement: pass.enforcePlanRequirement,
+						strategy,
+						rankingContext,
+						blockScope,
+						blockScopes,
+						onTransientRefreshFailure: recordTransientRefreshFailure,
+						// The outer candidate/pass ladder owns fallback and final affinity
+						// when reservations can reject an otherwise usable credential.
+						allowFallback: accountRequestId ? false : undefined,
+					},
+				);
+				if (!resolved) continue;
+				if (!accountRequestId) return resolved;
+				const keepAccount = candidate === explicitPin || candidate === forceRefreshCandidate;
+				const reservation = await reserveAccount(resolved, keepAccount);
+				if (reservation) {
+					return finishSelection(
+						reservation.busy ? { ...resolved, accountBusy: true, accountBusyReason: "pinned" } : resolved,
+						candidate,
+					);
+				}
+				busyCandidate ??= { resolved, candidate };
+			}
+			// Busy is not a quota/auth failure: reuse this pass's first eligible
+			// account rather than dropping into a weaker blocked/plan fallback.
+			if (busyCandidate) {
+				const reservation = await reserveAccount(busyCandidate.resolved, true);
+				if (reservation) {
+					const resolved = reservation.busy
+						? { ...busyCandidate.resolved, accountBusy: true, accountBusyReason: "all-busy" as const }
+						: busyCandidate.resolved;
+					return finishSelection(resolved, busyCandidate.candidate);
+				}
 			}
 		}
 
@@ -1225,6 +1304,7 @@ export class CredentialSelector {
 				}
 			}
 			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
+			if (updated.access !== result.apiKey) this.#deps.pool.noteBearer(provider, updated.access, credentialId);
 			if (options?.recordAffinity !== false) {
 				this.#deps.affinity.record(provider, sessionId, "oauth", selection.index);
 			}

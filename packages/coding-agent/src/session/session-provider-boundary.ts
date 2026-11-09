@@ -21,6 +21,7 @@ import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
+import { withAccountBusyNotice } from "./settings-stream-fn";
 
 import {
 	cfgModelLoopGuardCheckAssistantContent,
@@ -49,6 +50,8 @@ export interface SessionProviderBoundaryHost {
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
+	/** Session-local notice sink; side requests must not write notices directly to the console. */
+	notify?(level: "info" | "warning" | "error", message: string): void;
 	/** Current secret obfuscator; swapped when `secrets.enabled` turns on mid-session. */
 	obfuscator(): SecretObfuscator | undefined;
 	/** Tool calls emitted by assistant turns of the current agent run. */
@@ -231,6 +234,7 @@ export class SessionProviderBoundary {
 
 		const preparedOptions: SimpleStreamOptions = {
 			...options,
+			onAccountBusy: withAccountBusyNotice(options.onAccountBusy, this.#host.notify),
 			...(openrouterVariant !== undefined && { openrouterVariant }),
 			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(

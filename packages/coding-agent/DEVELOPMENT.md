@@ -106,6 +106,16 @@ Successful installs retain the previous executable and source commit under
 restarted; exit and resume them to load the new executable. Do not use `omp update`
 to maintain this fork: that installs an official binary and discards local changes.
 
+Antigravity account routing now reserves each live model request across local
+processes using the same config root. Automatic pins stay on an idle eligible
+account; an occupied pin yields to another eligible idle account. If all eligible
+accounts are busy, the request still proceeds on its ranked account with a visible
+warning. Explicit pins and same-account auth refreshes retain their selected
+account, warning when it is occupied. The install does not restart old processes:
+resume them with the updated binary before relying on cross-process avoidance,
+because old binaries do not publish these reservations. The fork build gate covers
+account selection, stream lifecycle, worker forwarding, and busy-notice delivery.
+
 ## Boot flow
 
 ```text

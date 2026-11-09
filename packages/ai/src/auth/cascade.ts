@@ -333,10 +333,14 @@ export class KeyCascade implements KeysApi {
 		let credentialId: number | undefined;
 		let oauthIdentity: OAuthRequestIdentity | undefined;
 		let oauthAccess: string | undefined;
-		const apiKey = await this.#resolve(provider, sessionId, options, (id, identity, access) => {
+		let accountBusy: boolean | undefined;
+		let accountBusyReason: OAuthResolutionResult["accountBusyReason"];
+		const apiKey = await this.#resolve(provider, sessionId, options, (id, identity, access, busy, busyReason) => {
 			credentialId = id;
 			oauthIdentity = identity;
 			oauthAccess = access;
+			accountBusy = busy;
+			accountBusyReason = busyReason;
 		});
 		if (apiKey === undefined) return undefined;
 		return {
@@ -344,6 +348,7 @@ export class KeyCascade implements KeysApi {
 			credentialId,
 			...(oauthAccess ? { oauthAccess } : {}),
 			...(oauthIdentity ? { oauthIdentity } : {}),
+			...(accountBusy ? { accountBusy, accountBusyReason } : {}),
 		};
 	}
 
@@ -361,7 +366,12 @@ export class KeyCascade implements KeysApi {
 	 */
 	async get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
 		try {
-			return await this.#resolve(provider, sessionId, options);
+			// Availability probes never own a request reservation.
+			return await this.#resolve(
+				provider,
+				sessionId,
+				options?.accountRequestId ? { ...options, accountRequestId: undefined } : options,
+			);
 		} catch (error) {
 			if (!(error instanceof AIError.OAuthRefreshUnavailableError)) throw error;
 			logger.debug("API key probe skipped transient OAuth refresh failure", { provider, error: error.message });
@@ -380,7 +390,13 @@ export class KeyCascade implements KeysApi {
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
-		onCredentialId?: (id: number, identity?: OAuthRequestIdentity, oauthAccess?: string) => void,
+		onCredentialId?: (
+			id: number,
+			identity?: OAuthRequestIdentity,
+			oauthAccess?: string,
+			accountBusy?: boolean,
+			accountBusyReason?: OAuthResolutionResult["accountBusyReason"],
+		) => void,
 	): Promise<string | undefined> {
 		const restricted = this.#deps.affinity.isRestricted(provider, sessionId);
 		// Runtime override takes highest priority
@@ -421,7 +437,13 @@ export class KeyCascade implements KeysApi {
 			if (onCredentialId && oauthResolved.credentialId !== undefined) {
 				const { orgId, region, inferenceRegion } = oauthResolved.credential;
 				const identity = { orgId, region, inferenceRegion };
-				onCredentialId(oauthResolved.credentialId, identity, oauthResolved.credential.access);
+				onCredentialId(
+					oauthResolved.credentialId,
+					identity,
+					oauthResolved.credential.access,
+					oauthResolved.accountBusy,
+					oauthResolved.accountBusyReason,
+				);
 			}
 			return oauthResolved.apiKey;
 		}
@@ -500,10 +522,10 @@ export class KeyCascade implements KeysApi {
 			provenance.record(resolved);
 			return resolved;
 		};
-		return async ({ lastChance, error, signal, previousKey }) => {
+		return async ({ lastChance, error, signal, previousKey, accountRequestId }) => {
 			const rejectedAccessToken = provenance.accessFor(previousKey);
 			if (error === undefined) {
-				return resolve({ signal });
+				return resolve({ signal, accountRequestId });
 			}
 			if (lastChance) {
 				const rotation = await this.#deps.rotate(provider, sessionId, {
@@ -520,7 +542,7 @@ export class KeyCascade implements KeysApi {
 					// because a peer may have refreshed the failed bearer.
 					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 				}
-				const resolved = await resolve({ signal });
+				const resolved = await resolve({ signal, accountRequestId });
 				return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 			}
 			return resolve({
@@ -528,6 +550,7 @@ export class KeyCascade implements KeysApi {
 				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 				rejectedAccessToken,
 				signal,
+				accountRequestId,
 			});
 		};
 	}

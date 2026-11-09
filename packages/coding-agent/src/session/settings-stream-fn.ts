@@ -63,13 +63,38 @@ function timeoutSecondsToMs(value: number): number | undefined {
 	return Math.max(1, Math.trunc(value * 1000));
 }
 
+type AccountBusyHook = NonNullable<SimpleStreamOptions["onAccountBusy"]>;
+const sessionAccountBusyHooks = new WeakSet<AccountBusyHook>();
+
+/** Add the session notice once, even when a side request also passes the settings wrapper. */
+export function withAccountBusyNotice(
+	hook: AccountBusyHook | undefined,
+	notify: SettingsStreamSlowModeContext["notify"],
+): AccountBusyHook | undefined {
+	if (!notify || (hook && sessionAccountBusyHooks.has(hook))) return hook;
+	const wrapped: AccountBusyHook = info => {
+		try {
+			const message =
+				info.reason === "pinned"
+					? `${info.provider}: the selected account is busy; keeping this request on that same account without waiting.`
+					: `${info.provider}: all eligible automatic-routing accounts are busy; continuing by sharing an occupied account without waiting.`;
+			notify("warning", message);
+		} catch {
+			// A notice sink must not prevent the caller's hook or provider dispatch.
+		}
+		return hook?.(info);
+	};
+	sessionAccountBusyHooks.add(wrapped);
+	return wrapped;
+}
+
 /** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`), and server-side fallback opt-out. */
 export interface SettingsStreamSlowModeContext {
 	/** Defaults to the process-wide lane registry. */
 	lanes?: AnthropicSlowModeLanes;
 	/** Final gate before auto-accepting the lane for `model` (e.g. prefer sibling accounts). */
 	canAutoAccept?: (model: Model) => boolean | Promise<boolean>;
-	/** Route slow-mode notices to the requesting session. */
+	/** Route provider request notices to the requesting session. */
 	notify?: (level: "info" | "warning" | "error", message: string) => void;
 	/** Record which account lane served the session's latest Anthropic request. */
 	onLane?: (lane: string) => void;
@@ -179,6 +204,7 @@ export function createSettingsAwareStreamFn(
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
 			maxInFlightRequests,
+			onAccountBusy: withAccountBusyNotice(streamOptions?.onAccountBusy, slowModeContext?.notify),
 			loopGuard: {
 				enabled: cfgModelLoopGuardEnabled.get(settings),
 				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(settings),

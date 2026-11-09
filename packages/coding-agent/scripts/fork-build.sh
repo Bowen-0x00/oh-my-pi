@@ -104,6 +104,12 @@ done
 "$bun" test \
 	packages/ai/test/google-antigravity-usage.test.ts \
 	packages/ai/test/auth-storage-antigravity-selection.test.ts \
+	packages/ai/test/account-load.test.ts \
+	packages/ai/test/auth-storage-account-load.test.ts \
+	packages/ai/test/stream-account-load.test.ts \
+	packages/ai/test/google-gemini-cli-first-event-timeout.test.ts \
+	packages/coding-agent/test/session-account-busy-notice.test.ts \
+	packages/coding-agent/test/thread/auth-service.test.ts \
 	packages/catalog/test/compat-compile.test.ts \
 	packages/ai/test/auth-storage-codex-selection.test.ts \
 	packages/ai/test/auth-storage-block-persistence.test.ts \

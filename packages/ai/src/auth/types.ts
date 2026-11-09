@@ -497,6 +497,8 @@ export type AuthApiKeyOptions = {
 	 * stranding the caller for `timeoutMs * (maxRetries + 1)`.
 	 */
 	signal?: AbortSignal;
+	/** Live streaming request reservation, shared by initial resolution and auth retries. */
+	accountRequestId?: string;
 	/**
 	 * Force a re-mint of the session-preferred OAuth credential's access token,
 	 * bypassing the not-yet-expired short-circuit. Powers step (b) of the

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Enabled idle-account preference for Antigravity requests without changing other providers' account-routing policies.
 - Fixed Google Antigravity quota routing to distinguish Gemini 4 Argon and its thinking variants from the ordinary Gemini meter.
 - Added an Antigravity Argon-only policy for focused next-step recovery after repeated replay-safe transport failures.
 - Corrected Devin SWE-2 Flash and SWE-2 Fast token pricing, and SWE-2's promotional rates and end time ([#18332](https://github.com/can1357/oh-my-pi/pull/18332) by [@eggpeat](https://github.com/eggpeat))

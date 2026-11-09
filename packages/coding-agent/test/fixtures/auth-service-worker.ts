@@ -1,5 +1,10 @@
 import { type MessagePort, parentPort } from "node:worker_threads";
-import { AuthStorage, type SessionRestrictionLease } from "@oh-my-pi/pi-ai";
+import {
+	AuthStorage,
+	type AuthApiKeyOptions,
+	type ResolvedApiKey,
+	type SessionRestrictionLease,
+} from "@oh-my-pi/pi-ai";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { anthropicSlowModeLanes } from "../../src/session/anthropic-slow-mode";
@@ -11,6 +16,12 @@ import { RemoteSlowModeLane } from "../../src/thread/services/auth-remote";
 /** Worker-side operations the test drives; each crosses to main as an async function. */
 export interface AuthProbe {
 	key(provider: string, sessionId: string): Promise<string | undefined>;
+	keyWithCredential(
+		provider: string,
+		sessionId: string,
+		options: AuthApiKeyOptions,
+		registry?: ModelRegistry,
+	): Promise<ResolvedApiKey | undefined>;
 	keyError(provider: string, sessionId: string): Promise<{ missingApiKey: boolean; message: string }>;
 	accountId(provider: string, sessionId: string): Promise<string | undefined>;
 	restrict(provider: string, sessionId: string, identityKeys: string[]): Promise<number>;
@@ -53,6 +64,10 @@ function buildProbe(storage: AuthStorage): AuthProbe {
 	let firstRegistry: ModelRegistry | undefined;
 	return {
 		key: (provider, sessionId) => storage.keys.get(provider, sessionId),
+		keyWithCredential: (provider, sessionId, options, registry) =>
+			registry
+				? registry.getApiKeyWithCredentialForProvider(provider, sessionId, options)
+				: storage.keys.getWithCredential(provider, sessionId, options),
 		keyError: async (provider, sessionId) => {
 			try {
 				await storage.keys.get(provider, sessionId);

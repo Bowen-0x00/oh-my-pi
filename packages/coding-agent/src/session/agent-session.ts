@@ -2678,6 +2678,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
+			notify: (level, message) => this.emitNotice(level, message, "provider-request"),
 			obfuscator: () => this.#obfuscator,
 			runToolCallIds: () => this.#runToolCallIds,
 		};

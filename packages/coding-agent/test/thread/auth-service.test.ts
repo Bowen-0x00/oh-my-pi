@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { MessageChannel } from "node:worker_threads";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { AccountLoadCoordinator, accountLoadCoordinator } from "../../../ai/src/auth/account-load";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { anthropicSlowModeLanes } from "../../src/session/anthropic-slow-mode";
 import type { MainThreadLink } from "../../src/thread/protocol";
@@ -123,6 +124,40 @@ describe("auth thread service", () => {
 
 		expect(await probe.key(PROVIDER, "pinned")).toBe("access-b");
 		expect(await probe.accountId(PROVIDER, "pinned")).toBe("acc-b");
+	});
+
+	it("preserves live request reservations and busy metadata through worker storage and registry facades", async () => {
+		const { a } = await storeAccounts();
+		const coordinator = new AccountLoadCoordinator(path.join(tempDir, "account-requests"));
+		vi.spyOn(accountLoadCoordinator, "reserve").mockImplementation((provider, id, key, allowBusy) =>
+			coordinator.reserve(provider, id, key, allowBusy),
+		);
+		const leases = await Promise.all(Array.from({ length: 4 }, () => coordinator.create(PROVIDER)));
+		try {
+			const first = await probe.keyWithCredential(PROVIDER, "worker-one", { accountRequestId: leases[0]!.id });
+			const second = await probe.keyWithCredential(
+				PROVIDER,
+				"worker-two",
+				{ accountRequestId: leases[1]!.id },
+				registry,
+			);
+			expect(first?.apiKey).toBeDefined();
+			expect(second?.apiKey).toBeDefined();
+			expect(first?.credentialId).not.toBe(second?.credentialId);
+			expect(first?.accountBusy).not.toBe(true);
+			expect(second?.accountBusy).not.toBe(true);
+			const third = await probe.keyWithCredential(PROVIDER, "worker-three", { accountRequestId: leases[2]!.id });
+			expect(third?.accountBusy).toBe(true);
+			expect(third?.accountBusyReason).toBe("all-busy");
+			expect([first?.credentialId, second?.credentialId]).toContain(third?.credentialId);
+			expect(storage.sessions.pin(PROVIDER, "worker-pinned", a)).toBe(true);
+			const pinned = await probe.keyWithCredential(PROVIDER, "worker-pinned", { accountRequestId: leases[3]!.id });
+			expect(pinned?.credentialId).toBe(a);
+			expect(pinned?.accountBusy).toBe(true);
+			expect(pinned?.accountBusyReason).toBe("pinned");
+		} finally {
+			await Promise.all(leases.map(lease => lease.release()));
+		}
 	});
 
 	it("restricts main lookups with a worker lease until the worker unrestricts", async () => {

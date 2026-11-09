@@ -486,6 +486,13 @@ export type OpenAIResponseInclude =
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
 
+/** Advisory notice emitted when a live request must share an occupied OAuth account. */
+export interface AccountBusyInfo {
+	provider: string;
+	credentialId?: number;
+	reason?: "all-busy" | "pinned";
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -517,6 +524,8 @@ export interface StreamOptions {
 	credentialId?: number;
 	/** @internal Non-secret identity of the bearer serving this attempt; never persisted in history. */
 	oauthIdentity?: OAuthRequestIdentity;
+	/** Advisory only: a throwing callback never interrupts inference or changes account routing. */
+	onAccountBusy?: (info: AccountBusyInfo) => void;
 	cacheRetention?: CacheRetention;
 	/**
 	 * Anthropic preserved-thinking behavior when a signed block no longer matches

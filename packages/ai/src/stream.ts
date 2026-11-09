@@ -3,6 +3,7 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import {
@@ -15,7 +16,16 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	type ApiKeyResolution,
+	type ResolvedApiKey,
+	type ApiKeyResolver,
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
+import { accountLoadCoordinator, type AccountRequestLease } from "./auth/account-load";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -1222,6 +1232,17 @@ function streamSimpleRequest<TApi extends Api>(
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
+		let lease: AccountRequestLease | undefined;
+		const releaseLease = async (): Promise<void> => {
+			try {
+				await lease?.release();
+			} catch (error) {
+				logger.warn("Failed to release account request", { error: String(error) });
+			}
+		};
+		const releaseOnAbort = (): void => {
+			void releaseLease();
+		};
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
@@ -1229,6 +1250,7 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
+			resolved?: ApiKeyResolution,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1238,6 +1260,18 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
+				if (typeof resolved === "object" && resolved.accountBusy) {
+					try {
+						const notification: unknown = requestOptions.onAccountBusy?.({
+							provider: model.provider,
+							credentialId,
+							reason: resolved.accountBusyReason,
+						});
+						if (notification instanceof Promise) void notification.catch(() => {});
+					} catch {
+						// Notices are advisory; observers cannot change account routing or fail inference.
+					}
+				}
 				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
@@ -1268,6 +1302,7 @@ function streamSimpleRequest<TApi extends Api>(
 					}
 					flushBuffered();
 					emittedReplayUnsafeEvent = true;
+					if (event.type === "done" || event.type === "error") await releaseLease();
 					outer.push(event);
 					if (outer.done) return undefined;
 				}
@@ -1275,6 +1310,7 @@ function streamSimpleRequest<TApi extends Api>(
 				if (!outer.done) {
 					const result = await inner.result();
 					if (credentialId !== undefined) result.credentialId = credentialId;
+					await releaseLease();
 					outer.end(result);
 				}
 			} catch (error) {
@@ -1290,11 +1326,13 @@ function streamSimpleRequest<TApi extends Api>(
 					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };
 				}
 				flushBuffered();
+				await releaseLease();
 				outer.fail(error);
 			}
 			return undefined;
 		};
-		const emitFailure = (failure: AuthRetryFailure): void => {
+		const emitFailure = async (failure: AuthRetryFailure): Promise<void> => {
+			await releaseLease();
 			emitBufferedEvents(outer, failure.bufferedEvents);
 			if (failure.terminalEvent) {
 				outer.push(failure.terminalEvent);
@@ -1304,59 +1342,73 @@ function streamSimpleRequest<TApi extends Api>(
 		};
 
 		void (async () => {
-			let lastKey: string | undefined;
-			let credentialId: number | undefined;
-			let oauthIdentity: OAuthRequestIdentity | undefined;
+			signal?.addEventListener("abort", releaseOnAbort, { once: true });
 			try {
-				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
-				lastKey = resolvedApiKeyBearer(resolved);
-				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
-				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
-			} catch (error) {
-				// A thrown resolver is a broker/OAuth/network failure, not a missing
-				// key — surface the cause instead of masking it as "No API key".
-				outer.fail(
-					new AIError.ConfigurationError(
+				if (resolveCatalogPolicy(model).accountLoadBalancing === true) {
+					lease = await accountLoadCoordinator.create(model.provider);
+				}
+				signal?.throwIfAborted();
+				const resolveForRequest: ApiKeyResolver = ctx => apiKeyResolver({ ...ctx, accountRequestId: lease?.id });
+				let resolved: ApiKeyResolution;
+				try {
+					resolved = await resolveForRequest({ lastChance: false, error: undefined, signal });
+				} catch (error) {
+					// A thrown resolver is a broker/OAuth/network failure, not a missing key.
+					throw new AIError.ConfigurationError(
 						`Failed to resolve API key for provider ${model.provider}: ${error instanceof Error ? error.message : String(error)}`,
 						{ cause: error },
-					),
-				);
-				return;
-			}
-			if (lastKey === undefined) {
-				if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
-					const failure = await runAttempt();
-					if (failure) emitFailure(failure);
-					return;
+					);
 				}
-				outer.fail(new AIError.MissingApiKeyError(model.provider));
-				return;
-			}
-			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
-			if (!failure) return;
-			while (true) {
-				// Caller aborted between attempts: don't mint a fresh token or fire
-				// another doomed request — emit the captured failure instead.
-				if (signal?.aborted) break;
-				let nextCredentialId: number | undefined;
-				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
-				const nextKey = await resolveNextAuthRetryKey(
-					retryState,
-					apiKeyResolver,
-					failure.error,
-					signal,
-					resolved => {
-						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
-						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
-					},
+				signal?.throwIfAborted();
+				const lastKey = resolvedApiKeyBearer(resolved);
+				if (lastKey === undefined) {
+					if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
+						const failure = await runAttempt();
+						if (failure) await emitFailure(failure);
+						return;
+					}
+					throw new AIError.MissingApiKeyError(model.provider);
+				}
+				const retryState = createAuthRetryKeyState(lastKey);
+				let failure = await runAttempt(
+					lastKey,
+					typeof resolved === "object" ? resolved.credentialId : undefined,
+					typeof resolved === "object" ? resolved.oauthIdentity : undefined,
+					resolved,
 				);
-				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
-				if (!next) return;
-				failure = next;
+				if (!failure) return;
+				while (true) {
+					// Never resolve another credential or replay output after cancellation.
+					if (signal?.aborted) break;
+					let nextResolved: ApiKeyResolution = undefined;
+					const nextKey = await resolveNextAuthRetryKey(
+						retryState,
+						resolveForRequest,
+						failure.error,
+						signal,
+						value => {
+							nextResolved = value;
+						},
+					);
+					if (nextKey === undefined) break;
+					const resolvedObject = nextResolved as ResolvedApiKey | undefined;
+					const next = await runAttempt(
+						nextKey,
+						resolvedObject?.credentialId,
+						resolvedObject?.oauthIdentity,
+						nextResolved,
+					);
+					if (!next) return;
+					failure = next;
+				}
+				await emitFailure(failure);
+			} catch (error) {
+				await releaseLease();
+				outer.fail(error);
+			} finally {
+				signal?.removeEventListener("abort", releaseOnAbort);
+				await releaseLease();
 			}
-			emitFailure(failure);
 		})();
 		return outer;
 	}
@@ -1794,6 +1846,7 @@ function mapOptionsForApi<TApi extends Api>(
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
 		credentialId: options?.credentialId,
 		oauthIdentity: options?.oauthIdentity,
+		onAccountBusy: options?.onAccountBusy,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,

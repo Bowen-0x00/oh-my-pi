@@ -34,7 +34,12 @@ import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
-import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	armPreResponseTimeout,
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+} from "../utils/idle-iterator";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -329,6 +334,7 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const DEFAULT_FIRST_EVENT_TIMEOUT_MS = 300_000;
 const FIRST_EVENT_TIMEOUT_ERROR = "Cloud Code Assist stream timed out while waiting for the first event";
+const STREAM_IDLE_TIMEOUT_ERROR = "Cloud Code Assist stream stalled while waiting for the next event";
 const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
 const GOOGLE_GEMINI_REFRESH_SKEW_MS = 60_000;
@@ -638,10 +644,42 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				getStreamFirstEventTimeoutMs(
 					undefined,
 					model.compat.streamFirstEventTimeoutMs ?? DEFAULT_FIRST_EVENT_TIMEOUT_MS,
-				);
+				) ??
+				0;
+			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
 			const callerSignal = options?.signal;
 			const toolNames = new Set(context.tools?.map(t => t.name) ?? []);
 			const isFlashLeakModel = model.compat.flashStreamLeakWorkaround;
+
+			const fetchResponse = async (requestUrl: string, maxAttempts: number): Promise<Response> => {
+				// Clear at headers: an absolute deadline would also abort an active body.
+				// Empty-response retries need the same guard as the initial request.
+				const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
+				try {
+					return await fetchWithRetry(requestUrl, {
+						method: "POST",
+						headers: requestHeaders,
+						body: requestBodyJson,
+						signal: watchdog.signal,
+						maxAttempts,
+						defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+						maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+						fetch: options?.fetch,
+						timeout: false,
+					});
+				} catch (error) {
+					// fetchWithRetry flattens aborts. Restore only our watchdog's
+					// timeout; caller cancellation must never trigger failover.
+					if (watchdog.signal?.aborted && !callerSignal?.aborted) {
+						throw new AIError.StreamTimeoutError(FIRST_EVENT_TIMEOUT_ERROR, {
+							cause: watchdog.signal.reason,
+						});
+					}
+					throw error;
+				} finally {
+					watchdog.clear();
+				}
+			};
 
 			let started = false;
 			// Once any stream event starts, the endpoint is committed downstream.
@@ -794,10 +832,19 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					),
 					{
 						firstItemTimeoutMs: firstEventTimeoutMs,
-						errorMessage: FIRST_EVENT_TIMEOUT_ERROR,
+						idleTimeoutMs,
+						errorMessage: STREAM_IDLE_TIMEOUT_ERROR,
 						firstItemErrorMessage: FIRST_EVENT_TIMEOUT_ERROR,
 						onFirstItemTimeout: () =>
 							responseAbortController.abort(new AIError.StreamTimeoutError(FIRST_EVENT_TIMEOUT_ERROR)),
+						onIdle: () =>
+							responseAbortController.abort(new AIError.StreamTimeoutError(STREAM_IDLE_TIMEOUT_ERROR)),
+						// Metadata/heartbeats are not model progress. Otherwise the
+						// first-output timer disappears before any output is delivered.
+						isProgressItem: item =>
+							(item as CloudCodeAssistResponseChunk).response?.candidates?.[0]?.content?.parts?.some(
+								part => (part.text !== undefined && part.text !== "") || part.functionCall !== undefined,
+							) ?? false,
 						abortSignal: options?.signal,
 					},
 				);
@@ -958,26 +1005,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					started = false;
 					resetOutput();
 
-					// Per attempt: arm a pre-response (TTFT) timer, cleared the instant
-					// headers arrive so it never aborts the actively streaming body —
-					// an absolute `AbortSignal.timeout` would (issue #2422).
-					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
-					let response: Response;
-					try {
-						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-							method: "POST",
-							headers: requestHeaders,
-							body: requestBodyJson,
-							signal: watchdog.signal,
-							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
-							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-							fetch: options?.fetch,
-							timeout: false,
-						});
-					} finally {
-						watchdog.clear();
-					}
+					const response = await fetchResponse(
+						`${endpoint}/v1internal:streamGenerateContent?alt=sse`,
+						isLastEndpoint ? MAX_RETRIES + 1 : 1,
+					);
 
 					if (!response.ok) {
 						if (AIError.isTransientStatus(response.status)) {
@@ -1021,12 +1052,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
-								method: "POST",
-								headers: requestHeaders,
-								body: requestBodyJson,
-								signal: options?.signal,
-							});
+							currentResponse = await fetchResponse(requestUrl, 1);
 
 							if (!currentResponse.ok) {
 								const retryErrorText = await currentResponse.text();
