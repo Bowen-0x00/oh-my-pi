@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { registerCustomApi, streamSimple, unregisterCustomApis } from "@oh-my-pi/pi-ai";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { Settings } from "../src/config/settings";
-import { createSettingsAwareStreamFn, withAccountBusyNotice } from "../src/session/settings-stream-fn";
+import {
+	createSettingsAwareStreamFn,
+	withAccountBusyNotice,
+	withAuthRetryNotice,
+} from "../src/session/settings-stream-fn";
 import { runPrintMode } from "../src/modes/print-mode";
 import type { AgentSession, AgentSessionEvent } from "../src/session/agent-session";
 
@@ -96,6 +101,95 @@ describe("session account-busy notices", () => {
 		const stream = await wrapped(model, context, { apiKey: "static-key" });
 		await stream.result();
 		expect(notices).toEqual([]);
+	});
+
+	it("warns and switches through 403 accounts without exposing recoverable assistant errors", async () => {
+		const notices: Array<{ level: string; message: string }> = [];
+		const sent: string[] = [];
+		const retrySteps: boolean[] = [];
+		const callerStatuses: Array<number | undefined> = [];
+		const notify = (level: "info" | "warning" | "error", message: string) => notices.push({ level, message });
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				const key = String(options?.apiKey);
+				sent.push(key);
+				if (key === "allowed") return complete();
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (key === "denied-throw") {
+						stream.fail(new ProviderHttpError("Access denied", 403));
+					} else {
+						complete()
+							.result()
+							.then(message => {
+								stream.push({ type: "start", partial: message });
+								stream.push({
+									type: "error",
+									reason: "error",
+									error: {
+										...message,
+										content: [],
+										stopReason: "error",
+										errorStatus: 403,
+										errorMessage: "Access denied",
+									},
+								});
+							});
+					}
+				});
+				return stream;
+			},
+			SOURCE,
+		);
+		const keys = ["denied-throw", "denied-event", "allowed"];
+		const wrapped = createSettingsAwareStreamFn(Settings.isolated(), streamSimple, { notify });
+		const stream = await wrapped(model, context, {
+			apiKey: ctx => {
+				retrySteps.push(ctx.lastChance);
+				return keys[retrySteps.length - 1];
+			},
+			onAuthRetry: withAuthRetryNotice(info => {
+				callerStatuses.push(info.status);
+				throw new Error("observer failed");
+			}, notify),
+		});
+		const eventTypes: string[] = [];
+		for await (const event of stream) eventTypes.push(event.type);
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(sent).toEqual(keys);
+		expect(retrySteps).toEqual([false, true, true]);
+		expect(eventTypes).not.toContain("error");
+		expect(callerStatuses).toEqual([403, 403]);
+		expect(notices.map(notice => notice.level)).toEqual(["warning", "warning"]);
+		expect(notices.every(notice => notice.message.includes("403"))).toBe(true);
+		expect(notices.some(notice => keys.some(key => notice.message.includes(key)))).toBe(false);
+	});
+
+	it("preserves a terminal 403 when no eligible sibling remains", async () => {
+		const notices: Array<{ level: string; message: string }> = [];
+		const sent: string[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				sent.push(String(options?.apiKey));
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(new ProviderHttpError("Access denied", 403)));
+				return stream;
+			},
+			SOURCE,
+		);
+		const wrapped = createSettingsAwareStreamFn(Settings.isolated(), streamSimple, {
+			notify: (level, message) => notices.push({ level, message }),
+		});
+		const stream = await wrapped(model, context, {
+			apiKey: ctx => (ctx.error === undefined ? "only-account" : undefined),
+		});
+		await expect(stream.result()).rejects.toMatchObject({ status: 403 });
+		expect(sent).toEqual(["only-account"]);
+		expect(notices.map(notice => notice.level)).toEqual(["warning"]);
+		expect(notices[0]?.message).toContain("no usable next account");
 	});
 
 	for (const mode of ["text", "json"] as const) {

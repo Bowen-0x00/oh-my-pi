@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Show the attempted account count and whether recovery stopped at its retry limit or could not resolve another account.
+- Show recoverable HTTP 403 responses as warnings and keep trying distinct accounts instead of stopping when account selection revisits a rejected credential, including side requests.
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes

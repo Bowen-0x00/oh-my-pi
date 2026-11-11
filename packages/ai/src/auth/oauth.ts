@@ -148,6 +148,7 @@ export class OAuthAccounts implements OAuthApi {
 		return {
 			accessToken: credential.access,
 			credentialId,
+			credentialCount: this.#deps.pool.entries(provider).length,
 			accountId: credential.accountId,
 			email: credential.email,
 			projectId: credential.projectId,

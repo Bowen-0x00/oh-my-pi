@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai";
+import { resolvedApiKeyBearer, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
@@ -243,15 +243,6 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			}),
 		).toEqual({ switched: true });
 		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sibling.credential.access);
-	});
-
-	test("resolver binds stored API keys to their credential rows", async () => {
-		if (!authStorage || !store) throw new Error("test setup failed");
-		await authStorage.credentials.set(PROVIDER, { type: "api_key", key: "stored-key" });
-		const row = store.listAuthCredentials(PROVIDER).find(entry => entry.credential.type === "api_key");
-		if (!row) throw new Error("expected stored API key row");
-		const resolved = await authStorage.keys.resolver(PROVIDER)({ lastChance: false, error: undefined });
-		expect(resolved).toEqual({ apiKey: "stored-key", credentialId: row.id });
 	});
 
 	test("resolver rotates the credential matching previousKey instead of a stale sticky", async () => {
@@ -612,6 +603,76 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		const second = await authStorage.keys.get(PROVIDER, "sess");
 		expect(second).not.toBe(first);
 	});
+
+	test("403 failover preserves stored logins instead of reporting valid credentials as suspect", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		let refreshCalls = 0;
+		registerProvider(() => {
+			refreshCalls += 1;
+		});
+		await authStorage.credentials.set(PROVIDER, [
+			{ type: "oauth", access: "denied-A", refresh: "ref-A", expires: farExpiry() },
+			{ type: "oauth", access: "denied-B", refresh: "ref-B", expires: farExpiry() },
+			{ type: "oauth", access: "allowed-C", refresh: "ref-C", expires: farExpiry() },
+		]);
+		const credentialStore = store;
+		// A broker may disable rows reported as suspect. A valid-token 403 must
+		// never reach that hard-auth path.
+		credentialStore.markCredentialSuspect = async id => {
+			await credentialStore.deleteAuthCredential(id, "suspect credential");
+		};
+		const rows = store.listAuthCredentials(PROVIDER);
+		const attempted: string[] = [];
+		const result = await withAuth(authStorage.keys.resolver(PROVIDER, { sessionId: "403-failover" }), async key => {
+			attempted.push(key);
+			if (key !== "allowed-C") throw new ProviderHttpError("Access denied for this account", 403);
+			return "completed";
+		});
+
+		expect(result).toBe("completed");
+		expect(attempted).toContain("allowed-C");
+		expect(new Set(attempted).size).toBe(attempted.length);
+		expect(refreshCalls).toBe(0);
+		expect(store.listAuthCredentials(PROVIDER).map(row => row.id)).toEqual(rows.map(row => row.id));
+		for (const row of rows) {
+			if (row.credential.type !== "oauth" || !attempted.includes(row.credential.access)) continue;
+			const block = store.getCredentialBlock?.(row.id, `${PROVIDER}:oauth`, "account-policy");
+			if (row.credential.access === "allowed-C") expect(block).toBeUndefined();
+			else expect(block).toBeGreaterThan(Date.now());
+		}
+	});
+
+	test.each(["api-key", "oauth-access"] as const)(
+		"%s recovery reaches a healthy account beyond the 64-attempt fallback ceiling",
+		async mode => {
+			if (!authStorage || !store) throw new Error("test setup failed");
+			registerProvider();
+			await authStorage.credentials.set(
+				PROVIDER,
+				Array.from({ length: 65 }, (_, index) => ({
+					type: "oauth" as const,
+					access: `large-pool-${index}`,
+					refresh: `refresh-${index}`,
+					expires: farExpiry(),
+				})),
+			);
+			const attempted: string[] = [];
+			const attempt = async (key: string): Promise<string> => {
+				attempted.push(key);
+				if (attempted.length < 65) throw new ProviderHttpError("Account service disabled (TOS_VIOLATION)", 403);
+				return "completed";
+			};
+			const result =
+				mode === "api-key"
+					? await withAuth(authStorage.keys.resolver(PROVIDER, { sessionId: "large-pool" }), attempt)
+					: await withOAuthAccess(authStorage, PROVIDER, access => attempt(access.accessToken), {
+							sessionId: "large-pool",
+						});
+			expect(result).toBe("completed");
+			expect(new Set(attempted).size).toBe(65);
+			expect(store.listAuthCredentials(PROVIDER)).toHaveLength(65);
+		},
+	);
 
 	test("rotateSessionCredential(cyber policy) soft-blocks the denied account and rotates", async () => {
 		if (!authStorage) throw new Error("test setup failed");

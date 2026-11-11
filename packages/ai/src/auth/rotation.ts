@@ -386,8 +386,8 @@ export class RateLimits implements LimitsApi {
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
 	 * - exact model-entitlement denial (Codex ChatGPT account or Cursor plan) →
 	 *   temporarily block only that requested model, then rotate.
-	 * - other account-scoped policy denial → temporarily block that account
-	 *   without marking its credential suspect, then rotate through siblings.
+	 * - HTTP 403 / other account-scoped policy denial → temporarily block that
+	 *   account without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
 	 *   reload when no broker hook is wired) and block it, then drop matching
 	 *   sticky state.
@@ -425,6 +425,7 @@ export class RateLimits implements LimitsApi {
 			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
 		}
 
+		const forbidden = status === 403 && !AIError.isInvalidatedOAuthTokenError(error);
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
 		const exactCodexModelPolicy =
 			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, options?.modelId);
@@ -432,14 +433,14 @@ export class RateLimits implements LimitsApi {
 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
-			allowStaleOAuthBearer: accountPolicy || exactModelPolicy,
+			allowStaleOAuthBearer: accountPolicy || exactModelPolicy || forbidden,
 		});
 		if (!sessionCredential) return { switched: false };
 		// The exact sentence is provider-controlled input. A non-Codex provider,
 		// absent request model, or mismatched model must not turn it into either a
 		// global block or a hard-auth invalidation.
 		if (deniedModel !== undefined && !exactCodexModelPolicy) return { switched: false };
-		if (exactModelPolicy || accountPolicy) {
+		if (exactModelPolicy || accountPolicy || forbidden) {
 			const modelPolicyScope = exactModelPolicy
 				? modelAccountPolicyBlockScope(provider, options?.modelId)
 				: undefined;

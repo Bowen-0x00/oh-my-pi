@@ -178,6 +178,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	signal: AbortSignal,
 	format: string,
 	peer: string,
+	excludedCredentialIds?: readonly number[],
 ): Promise<ResolvedApiKey | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
@@ -204,7 +205,10 @@ async function refreshGatewayApiKeyAfterAuthError(
 			error: message,
 		});
 		if (!switched) return undefined;
-		return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
+		return storage.keys.getWithCredential(provider, sessionId, {
+			...modelKeyOptions(model, signal),
+			excludedCredentialIds,
+		});
 	}
 	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
@@ -213,7 +217,10 @@ async function refreshGatewayApiKeyAfterAuthError(
 		peer,
 		error: message,
 	});
-	return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
+	return storage.keys.getWithCredential(provider, sessionId, {
+		...modelKeyOptions(model, signal),
+		excludedCredentialIds,
+	});
 }
 
 /** Model-scoped key options: usage ranking by model id, routing to accounts discovery saw serve it. */
@@ -256,7 +263,7 @@ export function buildGatewayApiKeyResolver(
 	// token a 401 rejected is looked up from the bearer that request sent.
 	const provenance = createOAuthProvenance();
 	provenance.record(initialKey);
-	return async ({ lastChance, error, signal, previousKey }) => {
+	return async ({ lastChance, error, signal, previousKey, excludedCredentialIds }) => {
 		if (initialKey.apiKey === NO_AUTH_SENTINEL && initialKey.credentialId === undefined) {
 			return error === undefined ? initialKey : undefined;
 		}
@@ -277,6 +284,7 @@ export function buildGatewayApiKeyResolver(
 					forceRefresh: true,
 					refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 					rejectedAccessToken,
+					excludedCredentialIds,
 				},
 			);
 			provenance.record(refreshed);
@@ -294,6 +302,7 @@ export function buildGatewayApiKeyResolver(
 			sig,
 			format,
 			peer,
+			excludedCredentialIds,
 		);
 		provenance.record(next);
 		lastKey = next?.apiKey ?? lastKey;

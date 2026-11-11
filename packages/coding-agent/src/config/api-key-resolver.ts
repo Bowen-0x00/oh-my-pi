@@ -69,6 +69,7 @@ export function createApiKeyResolver(
 		refreshReason?: AuthApiKeyOptions["refreshReason"],
 		rejectedAccessToken?: string,
 		accountRequestId?: string,
+		excludedCredentialIds?: readonly number[],
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
@@ -78,11 +79,12 @@ export function createApiKeyResolver(
 			refreshReason,
 			rejectedAccessToken,
 			accountRequestId,
+			excludedCredentialIds,
 		});
 		provenance.record(resolved);
 		return resolved;
 	};
-	return async ({ lastChance, error, signal, previousKey, accountRequestId }) => {
+	return async ({ lastChance, error, signal, previousKey, accountRequestId, excludedCredentialIds }) => {
 		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			return resolveKey(undefined, signal, undefined, undefined, accountRequestId);
@@ -108,7 +110,14 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
-			const resolved = await resolveKey(undefined, signal, undefined, undefined, accountRequestId);
+			const resolved = await resolveKey(
+				undefined,
+				signal,
+				undefined,
+				undefined,
+				accountRequestId,
+				rotation.afterSiblingWait ? undefined : excludedCredentialIds,
+			);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
 		return resolveKey(
@@ -117,6 +126,7 @@ export function createApiKeyResolver(
 			AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			rejectedAccessToken,
 			accountRequestId,
+			excludedCredentialIds,
 		);
 	};
 }

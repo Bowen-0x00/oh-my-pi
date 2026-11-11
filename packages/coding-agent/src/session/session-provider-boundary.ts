@@ -25,7 +25,7 @@ import {
 } from "./session-context";
 import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
-import { withAccountBusyNotice } from "./settings-stream-fn";
+import { withAccountBusyNotice, withAuthRetryNotice } from "./settings-stream-fn";
 
 import {
 	cfgModelLoopGuardCheckAssistantContent,
@@ -246,6 +246,7 @@ export class SessionProviderBoundary {
 		const preparedOptions: SimpleStreamOptions = {
 			...options,
 			onAccountBusy: withAccountBusyNotice(options.onAccountBusy, this.#host.notify),
+			onAuthRetry: withAuthRetryNotice(options.onAuthRetry, this.#host.notify),
 			...(openrouterVariant !== undefined && { openrouterVariant }),
 			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(

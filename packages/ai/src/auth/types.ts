@@ -499,6 +499,8 @@ export type AuthApiKeyOptions = {
 	signal?: AbortSignal;
 	/** Live streaming request reservation, shared by initial resolution and auth retries. */
 	accountRequestId?: string;
+	/** Request-local rejected rows; excluded even from blocked/last-resort fallback selection. */
+	excludedCredentialIds?: readonly number[];
 	/**
 	 * Force a re-mint of the session-preferred OAuth credential's access token,
 	 * bypassing the not-yet-expired short-circuit. Powers step (b) of the
@@ -553,6 +555,8 @@ export interface OAuthRequestIdentity {
 export interface OAuthAccess {
 	accessToken: string;
 	credentialId?: number;
+	/** Stored pool size used to bound a complete request-local account traversal. */
+	credentialCount?: number;
 	accountId?: string;
 	email?: string;
 	projectId?: string;
@@ -1387,8 +1391,8 @@ export interface LimitsApi {
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
 	 * - exact model-entitlement denial (Codex ChatGPT account or Cursor plan) →
 	 *   temporarily block only that requested model, then rotate.
-	 * - other account-scoped policy denial → temporarily block that account
-	 *   without marking its credential suspect, then rotate through siblings.
+	 * - HTTP 403 / other account-scoped policy denial → temporarily block that
+	 *   account without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
 	 *   reload when no broker hook is wired) and block it, then drop matching
 	 *   sticky state.

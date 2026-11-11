@@ -346,6 +346,7 @@ export class KeyCascade implements KeysApi {
 		return {
 			apiKey,
 			credentialId,
+			...(credentialId !== undefined ? { credentialCount: this.#deps.pool.entries(provider).length } : {}),
 			...(oauthAccess ? { oauthAccess } : {}),
 			...(oauthIdentity ? { oauthIdentity } : {}),
 			...(accountBusy ? { accountBusy, accountBusyReason } : {}),
@@ -522,7 +523,7 @@ export class KeyCascade implements KeysApi {
 			provenance.record(resolved);
 			return resolved;
 		};
-		return async ({ lastChance, error, signal, previousKey, accountRequestId }) => {
+		return async ({ lastChance, error, signal, previousKey, accountRequestId, excludedCredentialIds }) => {
 			const rejectedAccessToken = provenance.accessFor(previousKey);
 			if (error === undefined) {
 				return resolve({ signal, accountRequestId });
@@ -542,7 +543,11 @@ export class KeyCascade implements KeysApi {
 					// because a peer may have refreshed the failed bearer.
 					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 				}
-				const resolved = await resolve({ signal, accountRequestId });
+				const resolved = await resolve({
+					signal,
+					accountRequestId,
+					excludedCredentialIds: rotation.afterSiblingWait ? undefined : excludedCredentialIds,
+				});
 				return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 			}
 			return resolve({
@@ -551,6 +556,7 @@ export class KeyCascade implements KeysApi {
 				rejectedAccessToken,
 				signal,
 				accountRequestId,
+				excludedCredentialIds,
 			});
 		};
 	}

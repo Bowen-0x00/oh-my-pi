@@ -1370,7 +1370,11 @@ function streamSimpleRequest<TApi extends Api>(
 					}
 					throw new AIError.MissingApiKeyError(model.provider);
 				}
-				const retryState = createAuthRetryKeyState(lastKey);
+				const retryState = createAuthRetryKeyState(
+					lastKey,
+					typeof resolved === "object" ? resolved.credentialId : undefined,
+					typeof resolved === "object" ? resolved.credentialCount : undefined,
+				);
 				let failure = await runAttempt(
 					lastKey,
 					typeof resolved === "object" ? resolved.credentialId : undefined,
@@ -1392,7 +1396,43 @@ function streamSimpleRequest<TApi extends Api>(
 							nextResolved = value;
 						},
 					);
-					if (nextKey === undefined) break;
+					if (nextKey === undefined) {
+						if (!signal?.aborted) {
+							const stopReason =
+								retryState.attempts >= retryState.maxAttempts ? "attempt-limit" : "credentials-exhausted";
+							logger.warn("Provider credential recovery stopped", {
+								provider: model.provider,
+								model: model.id,
+								stopReason,
+								attempts: retryState.attempts,
+								maxAttempts: retryState.maxAttempts,
+								status: AIError.status(reportedFailure.error),
+								lastStatus: AIError.status(failure.error),
+							});
+							try {
+								const notification: unknown = requestOptions.onAuthRetry?.({
+									provider: model.provider,
+									status: AIError.status(reportedFailure.error),
+									stopReason,
+									attempts: retryState.attempts,
+									maxAttempts: retryState.maxAttempts,
+								});
+								if (notification instanceof Promise) void notification.catch(() => {});
+							} catch {
+								// A notice sink cannot replace the original provider failure.
+							}
+						}
+						break;
+					}
+					try {
+						const notification: unknown = requestOptions.onAuthRetry?.({
+							provider: model.provider,
+							status: AIError.status(failure.error),
+						});
+						if (notification instanceof Promise) void notification.catch(() => {});
+					} catch {
+						// Notices are advisory; observers cannot prevent credential recovery.
+					}
 					const resolvedObject = nextResolved as ResolvedApiKey | undefined;
 					const next = await runAttempt(
 						nextKey,

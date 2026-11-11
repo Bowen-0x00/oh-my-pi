@@ -88,6 +88,35 @@ export function withAccountBusyNotice(
 	return wrapped;
 }
 
+type AuthRetryHook = NonNullable<SimpleStreamOptions["onAuthRetry"]>;
+const sessionAuthRetryHooks = new WeakSet<AuthRetryHook>();
+
+/** Keep recoverable 403s out of assistant error frames, including on side requests. */
+export function withAuthRetryNotice(
+	hook: AuthRetryHook | undefined,
+	notify: SettingsStreamSlowModeContext["notify"],
+): AuthRetryHook | undefined {
+	if (!notify || (hook && sessionAuthRetryHooks.has(hook))) return hook;
+	const wrapped: AuthRetryHook = info => {
+		try {
+			if (info.stopReason) {
+				const detail =
+					info.stopReason === "attempt-limit"
+						? "the account retry limit was reached"
+						: "no usable next account could be resolved";
+				notify("warning", `${info.provider}: account recovery stopped after ${info.attempts} attempts; ${detail}.`);
+			} else if (info.status === 403) {
+				notify("warning", `${info.provider}: HTTP 403 access denied; switching accounts and retrying.`);
+			}
+		} catch {
+			// A notice sink must not prevent the caller's hook or credential recovery.
+		}
+		return hook?.(info);
+	};
+	sessionAuthRetryHooks.add(wrapped);
+	return wrapped;
+}
+
 /** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`), and server-side fallback opt-out. */
 export interface SettingsStreamSlowModeContext {
 	/** Defaults to the process-wide lane registry. */
@@ -205,6 +234,7 @@ export function createSettingsAwareStreamFn(
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
 			maxInFlightRequests,
 			onAccountBusy: withAccountBusyNotice(streamOptions?.onAccountBusy, slowModeContext?.notify),
+			onAuthRetry: withAuthRetryNotice(streamOptions?.onAuthRetry, slowModeContext?.notify),
 			loopGuard: {
 				enabled: cfgModelLoopGuardEnabled.get(settings),
 				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(settings),

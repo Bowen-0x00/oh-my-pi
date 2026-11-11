@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Fixed large account pools stopping at 64 authentication attempts before trying remaining stored accounts.
+- Preserve quota reset information when later accounts return HTTP 403, and report why credential recovery stopped.
+- Preserve signed-in accounts on HTTP 403 and continue through distinct sibling accounts, even when cooldowns expire or quota fallback would select a previously rejected account.
 - Prefer idle Antigravity OAuth accounts across local omp processes while preserving quota and account-pool restrictions; when every eligible account is busy, requests still proceed with a busy-account warning.
 - Fixed Gemini CLI and Antigravity requests hanging after metadata-only stream events and skipping fallback endpoints after first-response timeouts.
 - Fixed usage reports for imported OAuth accounts that have a refresh token but have not yet obtained their first access token.

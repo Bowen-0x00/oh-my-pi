@@ -541,14 +541,44 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["old-key", "switch-key"]);
 	});
 
-	it("surfaces the Z.AI reset rather than a stale sibling's 401 after rotation runs out", async () => {
+	it("streaming recovery reaches the 65th stored account without exposing earlier TOS failures", async () => {
+		const attempted: string[] = [];
+		const retryStatuses: Array<number | undefined> = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				attempted.push(String(options?.apiKey));
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (attempted.length === 65) ok(stream);
+					else stream.fail(new ProviderHttpError("Account service disabled (TOS_VIOLATION)", 403));
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		let index = 0;
+		const stream = streamSimple(model(), context, {
+			apiKey: () => {
+				const credentialId = ++index;
+				return { apiKey: `account-${credentialId}`, credentialId, credentialCount: 65 };
+			},
+			onAuthRetry: info => retryStatuses.push(info.status),
+		});
+		const eventTypes: string[] = [];
+		for await (const event of stream) eventTypes.push(event.type);
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(new Set(attempted).size).toBe(65);
+		expect(retryStatuses).toEqual(Array(64).fill(403));
+		expect(eventTypes).not.toContain("error");
+	});
+
+	it.each([401, 403])("surfaces the quota reset rather than a sibling's %i after rotation runs out", async status => {
 		const quota = Object.assign(
 			new Error("429 [1308][Usage limit reached for 5 hour. Your limit will reset at 13:23 UTC]"),
 			{ status: 429 },
 		);
-		const stale = Object.assign(new Error('401 {"error":{"message":"Authentication Failed","type":"1000"}}'), {
-			status: 401,
-		});
+		const stale = new ProviderHttpError("Account access rejected", status);
 		const keys: string[] = [];
 		registerCustomApi(
 			API,

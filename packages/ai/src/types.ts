@@ -493,6 +493,16 @@ export interface AccountBusyInfo {
 	reason?: "all-busy" | "pinned";
 }
 
+/** Advisory credential recovery progress or exhaustion. Contains no provider-controlled text or secrets. */
+export interface AuthRetryInfo {
+	provider: string;
+	status?: number;
+	/** Absent while retrying; present when recovery cannot dispatch another attempt. */
+	stopReason?: "attempt-limit" | "credentials-exhausted";
+	attempts?: number;
+	maxAttempts?: number;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -526,6 +536,8 @@ export interface StreamOptions {
 	oauthIdentity?: OAuthRequestIdentity;
 	/** Advisory only: a throwing callback never interrupts inference or changes account routing. */
 	onAccountBusy?: (info: AccountBusyInfo) => void;
+	/** Advisory only: observer failures never interrupt a credential retry. */
+	onAuthRetry?: (info: AuthRetryInfo) => void;
 	cacheRetention?: CacheRetention;
 	/**
 	 * Anthropic preserved-thinking behavior when a signed block no longer matches

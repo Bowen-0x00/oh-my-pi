@@ -232,7 +232,7 @@ describe("withAuth", () => {
 		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false, true, true]);
 	});
 
-	it("retains the exhausted key's reset when every rotated API key rejects authentication", async () => {
+	it.each([401, 403])("retains the exhausted key's reset when rotated API keys return %i", async status => {
 		const quota = usageLimitError();
 		const keys: string[] = [];
 		await expect(
@@ -247,7 +247,7 @@ describe("withAuth", () => {
 							: undefined,
 				async key => {
 					keys.push(key);
-					throw key === "exhausted" ? quota : authError();
+					throw key === "exhausted" ? quota : authError(status);
 				},
 			),
 		).rejects.toBe(quota);
@@ -810,7 +810,7 @@ describe("withOAuthAccess", () => {
 		expect(attempts).toEqual(["dead", "sibling"]);
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, "rotate", { forceRefresh: undefined }]);
 	});
-	it("retains the quota reset when a rotated OAuth sibling rejects authentication", async () => {
+	it.each([401, 403])("retains the quota reset when a rotated OAuth sibling returns %i", async status => {
 		const quota = usageLimitError();
 		const storage = fakeStorage({
 			initial: access("exhausted", { credentialId: 1 }),
@@ -820,7 +820,7 @@ describe("withOAuthAccess", () => {
 		await expect(
 			withOAuthAccess(storage, "prov", async a => {
 				attempts.push(a.accessToken);
-				throw a.accessToken === "exhausted" ? quota : authError();
+				throw a.accessToken === "exhausted" ? quota : authError(status);
 			}),
 		).rejects.toBe(quota);
 		expect(attempts).toEqual(["exhausted", "stale"]);

@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
@@ -681,6 +682,49 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		} finally {
 			peerStore.close();
 		}
+	});
+
+	test("Argon verification failover does not revisit denied accounts after cooldown expiry or quota fallback", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "google-antigravity";
+		await authStorage.credentials.set(
+			provider,
+			["denied", "also-denied", "last-resort"].map(id => ({
+				type: "oauth" as const,
+				...createCredential(id, `project-${id}`, `${id}@example.com`),
+			})),
+		);
+		for (const [accountId, usedFraction] of [
+			["denied", 0],
+			["also-denied", 0.2],
+			["last-resort", 1],
+		] as const) {
+			usageByAccount.set(
+				accountId,
+				createAntigravityReport({
+					accountId,
+					projectId: `project-${accountId}`,
+					argonEligible: true,
+					windows: [{ counter: "google-argon", usedFraction, resetInMs: HOUR_MS }],
+				}),
+			);
+		}
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const attempts: string[] = [];
+		const result = await withAuth(
+			authStorage.keys.resolver(provider, { sessionId: "verification-pool", modelId: "gemini-4-argon" }),
+			async key => {
+				attempts.push(key);
+				if (key === "api-last-resort") return "completed";
+				// A slow verification denial outlives the first account's cooldown.
+				if (key === "api-also-denied") now += 61_000;
+				throw new ProviderHttpError("Cloud Code Assist API error (403): Account verification required", 403);
+			},
+		);
+		expect(result).toBe("completed");
+		expect(attempts).toEqual(["api-denied", "api-also-denied", "api-last-resort"]);
+		expect(store.listAuthCredentials(provider)).toHaveLength(3);
 	});
 
 	test.each([

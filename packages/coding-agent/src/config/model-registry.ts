@@ -3747,6 +3747,7 @@ export class ModelRegistry {
 			rejectedAccessToken: options?.rejectedAccessToken,
 			signal: options?.signal,
 			accountRequestId: options?.accountRequestId,
+			excludedCredentialIds: options?.excludedCredentialIds,
 		});
 	}
 
