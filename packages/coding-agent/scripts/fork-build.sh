@@ -121,6 +121,8 @@ done
 	packages/ai/test/auth-storage-oauth-account-select.test.ts \
 	packages/ai/test/auth-storage-session-restriction.test.ts \
 	packages/ai/test/auth-storage-force-refresh-rotate.test.ts \
+	packages/ai/test/auth-retry.test.ts \
+	packages/ai/test/stream-auth-retry.test.ts \
 	packages/coding-agent/test/agent-session-transport-step-retry.test.ts \
 	packages/coding-agent/test/agent-session-thinking-loop-retry.test.ts \
 	packages/coding-agent/test/agent-session-retry-cap.test.ts \
