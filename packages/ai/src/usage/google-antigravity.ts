@@ -89,6 +89,8 @@ interface AntigravityEndpointResult {
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
+/** `UsageReport.metadata.quotaSource` of reports built from `retrieveUserQuotaSummary`. */
+const QUOTA_SUMMARY_SOURCE = "quota-summary";
 
 interface AntigravityWindowDescriptor {
 	id: string;
@@ -370,18 +372,21 @@ function buildQuotaSummaryReport(
 			counterKeys.length > 1
 				? `${bucket.bucketId ?? group?.displayName ?? "third-party"}:${window?.id ?? bucket.window ?? "default"}`
 				: undefined;
-		// The API's bucket `displayName` is generic ("Weekly Limit Remaining"),
-		// so the `bucketId` is the only signal that a Google-counter bucket
-		// tracks its own model family; Argon's weekly-only quota is separate
-		// from the shared Gemini weekly bucket and must stay distinguishable.
-		const bucketLabel = counterKeys.includes("google-argon") ? "Gemini (Argon)" : undefined;
+
 		for (const counterKey of counterKeys) {
 			const counterName = getQuotaSummaryCounterName(counterKey);
 			const windowId = window?.id ?? bucket.window ?? bucket.bucketId ?? "default";
+			// The API's bucket `displayName` is generic ("Weekly Limit Remaining"),
+			// so Argon's dedicated weekly bucket needs its own name to stay
+			// distinguishable from the shared Gemini weekly bucket in usage views.
 			const label =
 				sharedGroup !== undefined
 					? "Claude & GPT (shared)"
-					: (bucketLabel ?? (counterKey === "google" ? "Gemini" : counterName));
+					: counterKey === "google"
+						? "Gemini"
+						: counterKey === "google-argon"
+							? "Gemini (Argon)"
+							: counterName;
 			limits.push({
 				id: `${params.provider}:${counterKey}:default:${bucket.bucketId ?? windowId}`,
 				label: label ?? group?.displayName ?? bucket.displayName ?? "Usage",
@@ -421,6 +426,7 @@ function buildQuotaSummaryReport(
 	const metadata: UsageReport["metadata"] = {
 		endpoint,
 		projectId: params.credential.projectId,
+		quotaSource: QUOTA_SUMMARY_SOURCE,
 	};
 	if (params.credential.email) metadata.email = params.credential.email;
 	if (params.credential.accountId) metadata.accountId = params.credential.accountId;
@@ -757,9 +763,11 @@ function getAntigravityCounterLimits(report: UsageReport, counterKey: string): U
 	return report.limits.filter(limit => limit.id.toLowerCase().startsWith(prefix));
 }
 
+
 /**
  * Scope an Antigravity report to the active model's backend counter, falling
  * back to legacy default counters only when that backend has no limits.
+ * Gemini 4 Argon is scoped by {@link getAntigravityArgonLimits}.
  *
  * Exhaustion checks are only safe with a concrete backend counter. A no-model
  * credential lookup (for example image-provider discovery) must not turn one
@@ -842,31 +850,33 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 		const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 		return `counter:${counterKey ?? "unknown"}`;
 	},
-	// One scope per backend counter the report covers, judged by that
-	// counter's own windows. A 429 can carry a retry-after at the weekly reset
-	// while Google restores the quota days earlier; the next `/usage` fetch
-	// then lifts the block instead of the account idling until the clock runs out.
+	// One scope per backend counter, judged by the same limits ranking uses
+	// for it. A 429 can carry a retry-after at the weekly reset while Google
+	// restores the quota days earlier; the next `/usage` fetch then lifts the
+	// block instead of the account idling until the clock runs out.
 	healableBlockScopes(report) {
-		const counterKeys = new Set<string>();
+		const counterKeys = new Set<string>(["google-argon"]);
 		for (const limit of report.limits) {
 			const counterKey = limit.id.split(":")[1];
 			if (counterKey) counterKeys.add(counterKey.toLowerCase());
 		}
-		return [...counterKeys].map(counterKey => {
-			const limits = getAntigravityCounterLimits(report, counterKey);
-			return {
-				blockScope: `counter:${counterKey}`,
-				limits,
-				// Unknown windows cannot prove recovery, even if a sibling window
-				// is positive. Every reported gate in this same bucket must be funded.
-				healthy:
-					limits.length > 0 &&
-					limits.every(limit => {
-						const remaining = limit.amount.remainingFraction ?? limit.amount.remaining;
-						return remaining !== undefined && Number.isFinite(remaining) && remaining > 0;
-					}),
-			};
-		});
+		return [...counterKeys]
+			.map(counterKey => {
+				const limits = getAntigravityCounterLimits(report, counterKey);
+				return {
+					blockScope: `counter:${counterKey}`,
+					limits,
+					// Unknown windows cannot prove recovery, even if a sibling window
+					// is positive. Every reported gate in this same bucket must be funded.
+					healthy:
+						limits.length > 0 &&
+						limits.every(limit => {
+							const remaining = limit.amount.remainingFraction ?? limit.amount.remaining;
+							return remaining !== undefined && Number.isFinite(remaining) && remaining > 0;
+						}),
+				};
+			})
+			.filter(scope => scope.limits.length > 0);
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them
 	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo

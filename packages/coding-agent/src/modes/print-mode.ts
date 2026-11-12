@@ -19,6 +19,7 @@ import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { parseSlashCommand, parseSubcommand } from "../slash-commands/helpers/parse";
 import type { SlashCommandRuntime } from "../slash-commands/types";
+import { SPOTLIGHT_NOTICE_SOURCE } from "../spotlight/session";
 import { reconnectMcpManagerServer } from "../mcp/oauth-reauth";
 import {
 	formatPersistenceDurabilityFailure,
@@ -389,10 +390,12 @@ async function runPrintModeCore(
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||
 				event.source === COST_GATE_NOTICE_SOURCE ||
 				event.source === HINDSIGHT_NOTICE_SOURCE ||
-				event.source === "provider-request")
+				event.source === "provider-request" ||
+				event.source === SPOTLIGHT_NOTICE_SOURCE)
 		) {
 			// Account contention, automatic sign-outs, cost thresholds and memory failures
 			// must stay visible even in text mode, without contaminating the answer on stdout.
+			// Spotlight must also say when it lost its credential and fell back to unranked cuts.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
 		} else if (event.type === "auto_retry_start") {
 			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying
