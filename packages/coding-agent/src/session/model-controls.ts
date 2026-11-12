@@ -18,6 +18,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyDifficulty } from "../auto-thinking/classifier";
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveModelRedirect } from "../config/model-redirects";
 import {
 	filterAvailableModelsByEnabledPatterns,
 	formatModelStringWithRouting,
@@ -55,7 +56,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 } from "./settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelRedirects } from "../config/model-settings";
 
 /** Whether `model` takes effort per message, so changing it mid-conversation keeps the cached prefix. */
 function takesPerMessageEffort(model: Model): boolean {
@@ -177,6 +178,7 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
+	#redirect: { source: Model; target: Model; sessionId: string } | undefined;
 
 	constructor(
 		host: ModelControlsHost,
@@ -301,6 +303,69 @@ export class ModelControls {
 
 	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
 		return roleThinkingLevelForModel(this.#host.settings, this.#host.modelRegistry.getAvailable(), model);
+	}
+
+	/** An explicit model selection replaces any previously redirected selection. */
+	clearModelRedirect(): void {
+		this.#redirect = undefined;
+	}
+
+	/** Apply operator routing before credentials, context preparation, or a provider call. */
+	async applyModelRedirect(signal?: AbortSignal): Promise<boolean> {
+		const active = this.#model;
+		if (!active) return false;
+		const sessionId = this.#host.sessionId();
+		if (
+			this.#redirect &&
+			(this.#redirect.sessionId !== sessionId ||
+				formatModelStringWithRouting(active) !== formatModelStringWithRouting(this.#redirect.target))
+		) {
+			this.#redirect = undefined;
+		}
+		const source = this.#redirect?.source ?? active;
+		const redirects = cfgModelRedirects.get(this.#host.settings);
+		const redirected = resolveModelRedirect(source, redirects, this.#host.modelRegistry);
+		if (!redirected && !this.#redirect) return false;
+		const target = redirected ?? source;
+		if (formatModelStringWithRouting(target) === formatModelStringWithRouting(active)) {
+			if (!redirected) this.#redirect = undefined;
+			return false;
+		}
+		if (!this.#host.modelRegistry.hasConfiguredAuth(target)) {
+			throw new Error(
+				`Model redirect ${formatModelStringWithRouting(source)} -> ${formatModelStringWithRouting(target)} has no configured credential`,
+			);
+		}
+		const previousEditMode = this.#host.resolveActiveEditMode();
+		const thinkingLevel = this.configuredThinkingLevel();
+		const refreshed = await this.#host.modelRegistry.refreshSelectedModelMetadata(target);
+		signal?.throwIfAborted();
+		const sourceSelector = `${source.provider}/${source.id}`;
+		if (
+			this.#model !== active ||
+			cfgModelRedirects.get(this.#host.settings)[sourceSelector] !== redirects[sourceSelector]
+		) {
+			throw new Error("Model redirect changed while preparing the request; retry with the current route");
+		}
+		this.#host.clearActiveRetryFallback();
+		await this.#host.setModelWithProviderSessionReset(refreshed, "automatic");
+		this.#redirect = redirected ? { source, target: refreshed, sessionId } : undefined;
+		this.#host.sessionManager.appendModelChange(
+			formatModelStringWithRouting(refreshed),
+			"temporary",
+			false,
+			redirected ? formatModelStringWithRouting(source) : undefined,
+		);
+		this.setThinkingLevel(thinkingLevel);
+		await this.#host.syncAfterModelChange(previousEditMode);
+		this.#host.emitNotice(
+			"info",
+			redirected
+				? `Model redirect: ${formatModelStringWithRouting(source)} -> ${formatModelStringWithRouting(refreshed)}`
+				: `Model redirect removed: ${formatModelStringWithRouting(refreshed)}`,
+			"model-redirect",
+		);
+		return true;
 	}
 
 	async setModel(

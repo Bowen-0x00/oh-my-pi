@@ -153,6 +153,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	role?: string;
 	/** True when this transition selected a retry-fallback model rather than the configured model. */
 	resolvedModelIsFallback?: boolean;
+	/** Logical model selection to restore after an explicit request redirect. */
+	redirectedFrom?: string;
 }
 
 export interface ServiceTierChangeEntry extends SessionEntryBase {

@@ -830,6 +830,41 @@ chain rather than inheriting the active conversation model.
 
 If a role points at another role, the target model still inherits normally and any explicit suffix on the referring role wins for that role-specific use.
 
+### Explicit model redirects
+
+Model redirects are opt-in and independent of retries. By default no model is redirected.
+Use exact provider/model IDs to enable, inspect, or remove a global mapping:
+
+```text
+/redirect google-antigravity/gemini-4-argon maofei-gemini/gemini-4-argon-high
+/redirect
+/redirect off google-antigravity/gemini-4-argon
+```
+
+The command saves `modelRedirects` in the active global/profile `config.yml`, preserving
+other mappings. You can also edit the mapping directly:
+
+```yaml
+modelRedirects:
+   google-antigravity/gemini-4-argon: maofei-gemini/gemini-4-argon-high
+```
+
+Conversation sessions, including ordinary task subagents, apply the mapping before
+credentials and context preparation for their next main-loop request. They do not
+try the original provider first. Existing in-flight requests are not interrupted.
+Changing a target or deleting an entry takes effect at the next request boundary
+without restarting the host; deletion restores the original selection. A cold resume
+also restores the original selection before applying the current mapping.
+
+Redirects follow exactly one hop, not chains. They do not interpret roles, globs,
+or thinking suffixes; a colon in an ID is literal. Thinking is carried to the target
+and clamped to its supported levels. The target must be a registered chat model
+with configured credentials; an unavailable target fails explicitly rather than
+silently using the original provider. Per-call model approval remains enforced.
+Separately configured runner/advisor/utility roles are not rewritten by a conversation
+redirect. File edits follow normal settings-layer precedence, and `/redirect` reports
+when a higher layer still overrides a global change.
+
 ### Model presets
 
 A model preset is a named snapshot of every role assignment plus `defaultThinkingLevel`, so you can swap a whole setup at once:

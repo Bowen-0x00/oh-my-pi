@@ -4346,10 +4346,11 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent. A seance
 		// fork's selections belong to its source run, never to the consult.
 		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
+		const localModelChange = reopened.getSessionLocalModelChange();
 		const sessionLocalModel =
 			capture.spec.preparedSession || capture.perCallModel
 				? undefined
-				: reopened.getSessionLocalModelChange()?.model;
+				: (localModelChange?.redirectedFrom ?? localModelChange?.model);
 		try {
 			try {
 				const options = buildSubagentSessionOptions(

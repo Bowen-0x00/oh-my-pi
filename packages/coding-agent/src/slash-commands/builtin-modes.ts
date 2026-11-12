@@ -3,6 +3,9 @@ import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
+import { parseModelRedirectSelector, validateModelRedirects } from "../config/model-redirects-schema";
+import { cfgModelRedirects } from "../config/model-settings";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -798,6 +801,29 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "redirect",
+		icon: "swap",
+		description: "List or persist exact single-hop model redirects",
+		allowArgs: true,
+		acpInputHint: "[<source-provider/id> <target-provider/id> | off <source-provider/id>]",
+		inlineHint: "[<source-provider/id> <target-provider/id> | off <source-provider/id>]",
+		subcommands: [{ name: "off", description: "Remove a global model redirect", usage: "<source-provider/id>" }],
+		handle: async (command, runtime) => {
+			const outcome = await runRedirectCommand(command.args, runtime.settings, runtime.session.modelRegistry);
+			if (outcome.failed) return usage(outcome.message, runtime);
+			await runtime.output(outcome.message);
+			if (outcome.changedConfig) await runtime.notifyConfigChanged?.();
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			const outcome = await runRedirectCommand(command.args, ctx.settings, ctx.session.modelRegistry);
+			if (outcome.failed) ctx.showWarning(outcome.message);
+			else ctx.showStatus(outcome.message);
+		},
+	},
+	{
 		name: "modelpreset",
 		icon: "model",
 		description: "Save and switch model presets (role models + thinking level)",
@@ -964,5 +990,72 @@ async function runPresetsCommand(
 		}
 		default:
 			return { message: PRESETS_USAGE, usage: true };
+	}
+}
+
+const REDIRECT_USAGE = "Usage: /redirect [<source-provider/id> <target-provider/id> | off <source-provider/id>]";
+
+/** Persist only the global record, leaving higher-precedence entries and unrelated mappings alone. */
+async function runRedirectCommand(
+	args: string,
+	settings: Settings,
+	registry: Pick<AgentSession["modelRegistry"], "find" | "hasConfiguredAuth">,
+): Promise<{ message: string; failed?: boolean; changedConfig?: boolean }> {
+	const parts = args.trim().split(/\s+/).filter(Boolean);
+	if (parts.length === 0) {
+		const entries = Object.entries(cfgModelRedirects.get(settings)).sort(([left], [right]) =>
+			left.localeCompare(right),
+		);
+		return {
+			message: entries.length
+				? `Effective model redirects:\n${entries.map(([source, target]) => `${source} → ${target}`).join("\n")}`
+				: "No model redirects configured.",
+		};
+	}
+	if (parts.length !== 2) return { message: REDIRECT_USAGE, failed: true };
+	const remove = parts[0] === "off";
+	const source = remove ? parts[1] : parts[0];
+	const target = remove ? undefined : parts[1];
+	try {
+		parseModelRedirectSelector(source);
+		if (target !== undefined) {
+			validateModelRedirects({ [source]: target });
+			const parsed = parseModelRedirectSelector(target);
+			const model = registry.find(parsed.provider, parsed.id);
+			if (!model || formatModelString(model) !== target) {
+				throw new Error(`Model redirect target "${target}" was not found`);
+			}
+			if (modelKind(model) !== "chat") throw new Error(`Model redirect target "${target}" is not a chat model`);
+			if (!registry.hasConfiguredAuth(model))
+				throw new Error(`No API key configured for model redirect target "${target}"`);
+		}
+		const global = settings.getGlobalSettings().modelRedirects;
+		validateModelRedirects(global);
+		const redirects = { ...((global ?? {}) as Record<string, string>) };
+		const changed = target === undefined ? Object.hasOwn(redirects, source) : redirects[source] !== target;
+		if (target === undefined) delete redirects[source];
+		else redirects[source] = target;
+		if (changed) {
+			cfgModelRedirects.set(settings, redirects);
+		}
+		await settings.flush();
+		const effective = cfgModelRedirects.get(settings)[source];
+		const override =
+			effective !== target
+				? ` Higher-precedence settings still ${
+						effective ? `redirect ${source} → ${effective}` : `disable the redirect for ${source}`
+					}.`
+				: "";
+		return {
+			message:
+				(target === undefined
+					? changed
+						? `Removed global model redirect for ${source}.`
+						: `No global model redirect for ${source}.`
+					: `Saved global model redirect: ${source} → ${target}.`) + override,
+			changedConfig: changed,
+		};
+	} catch (error) {
+		return { message: `Failed to update model redirect: ${errorMessage(error)}`, failed: true };
 	}
 }

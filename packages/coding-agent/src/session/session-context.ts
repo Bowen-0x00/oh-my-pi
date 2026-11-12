@@ -348,7 +348,9 @@ export function buildSessionContext(
 			// New format: { model: "provider/id", role?: string }
 			if (entry.model) {
 				const role = entry.role ?? "default";
-				models[role] = entry.model;
+				// Redirects record the serving model but restore the operator's selection,
+				// so removing the route also works after a cold resume.
+				models[role] = entry.redirectedFrom ?? entry.model;
 				if (role === "default") {
 					hasExplicitDefaultModel = true;
 				}

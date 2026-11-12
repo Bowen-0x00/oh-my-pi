@@ -2323,6 +2323,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#setModelWithProviderSessionReset(model);
 				// Only a completed explicit selection, including same-model reselection, takes ownership.
 				if (selection === "explicit") this.#prewalk.releaseHandoff();
+				if (selection === "explicit") this.#models.clearModelRedirect();
 			},
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
@@ -2416,7 +2417,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
-		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async (signal, context) => {
+			if (await this.#models.applyModelRedirect(signal)) context.messages = this.agent.state.messages;
 			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
@@ -9477,6 +9479,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
 			const autoPrewalkTask = this.#isAutoPrewalkTask(message);
 			if (autoPrewalkTask) await this.#prewalk.beginAutoTask();
+			await this.#models.applyModelRedirect(setupAbort.signal);
 			const autoPrewalk = autoPrewalkTask ? this.#prewalk.classifyAuto(expandedText, setupAbort.signal) : undefined;
 			if (!(await logger.time("prompt:usagePreflight", () => this.#runUsageAwarePreflightForNextModelCall())))
 				return false;

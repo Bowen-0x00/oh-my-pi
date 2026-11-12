@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `/redirect <source> <target>` routing that sends subsequent conversation requests directly to another model; `/redirect off <source>` restores the original route without changing retry settings.
+
 ### Fixed
 
 - Show the attempted account count and whether recovery stopped at its retry limit or could not resolve another account.

@@ -5,6 +5,7 @@
 import { register, type SettingValueOf } from "./registry";
 import type { AuthAccountPolicies } from "@oh-my-pi/pi-ai/auth-storage";
 import type { cfgDefaultThinkingLevel } from "../session/settings";
+import { validateModelRedirects } from "./model-redirects-schema";
 
 /** Display metadata for one model tag. */
 export interface ModelTagDef {
@@ -107,6 +108,14 @@ export const cfgModelRoleStorage = register({
 });
 
 export const cfgModelRoles = register({ id: "modelRoles", type: "record", default: EMPTY_STRING_RECORD });
+
+/** Opt-in exact, single-hop model redirects, managed by `/redirect`. */
+export const cfgModelRedirects = register({
+	id: "modelRedirects",
+	type: "record",
+	default: EMPTY_STRING_RECORD,
+	validate: validateModelRedirects,
+});
 
 /** Total provider budget for one native judge candidate, including setup and retries. */
 export const cfgJudgmentAttemptTimeoutMs = register({
