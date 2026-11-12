@@ -88,7 +88,12 @@ arch=$("$bun" -p 'process.arch')
 # Bun checks package integrity; the compiler also checks the embedded version stamp.
 native_tmp=$(mktemp -d)
 printf '{"private":true}\n' > "$native_tmp/package.json"
-"$bun" add --cwd "$native_tmp" --ignore-scripts "@oh-my-pi/pi-natives-${platform}-${arch}@${version}"
+cached_tarball="/tmp/pi-natives-${platform}-${arch}-${version}.tgz"
+if [[ -f "$cached_tarball" ]]; then
+	"$bun" add --cwd "$native_tmp" --ignore-scripts "$cached_tarball"
+else
+	"$bun" add --cwd "$native_tmp" --ignore-scripts "@oh-my-pi/pi-natives-${platform}-${arch}@${version}"
+fi
 leaf="$native_tmp/node_modules/@oh-my-pi/pi-natives-${platform}-${arch}"
 shopt -s nullglob
 addons=("$leaf"/pi_natives.*.node)

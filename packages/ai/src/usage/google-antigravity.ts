@@ -862,7 +862,12 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 		}
 		return [...counterKeys]
 			.map(counterKey => {
-				const limits = getAntigravityCounterLimits(report, counterKey);
+				const limits =
+					counterKey === "google-argon" &&
+					report.metadata?.quotaSource !== QUOTA_SUMMARY_SOURCE &&
+					getAntigravityCounterLimits(report, "google-argon").length === 0
+						? getAntigravityCounterLimits(report, "google")
+						: getAntigravityCounterLimits(report, counterKey);
 				return {
 					blockScope: `counter:${counterKey}`,
 					limits,
