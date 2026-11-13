@@ -2367,6 +2367,15 @@
 				"status": {
 					"$ref": "#/$defs/TodoStatus"
 				},
+				"id": {
+					"type": "string"
+				},
+				"deps": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
 				"details": {
 					"type": "string"
 				},
@@ -2375,6 +2384,9 @@
 					"items": {
 						"type": "string"
 					}
+				},
+				"reason": {
+					"type": "string"
 				}
 			},
 			"required": [

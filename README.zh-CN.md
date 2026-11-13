@@ -288,7 +288,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 - `task` — 并行扇出子智能体，可选工作区隔离。
 - `wait` — 阻塞直到下一个后台结果、同伴消息或引导中断；通过 `agent://` 和 `proc://` 给同伴发消息、控制任务。
-- `todo` — 对会话待办列表进行有序修改，支持阶段跟踪。
+- `todo` — 对会话待办列表进行有序修改，支持阶段跟踪（传入 `--todo-dag` 可切换为依赖 DAG + 拓扑调度模式）。
 - `ask` — 交互式运行中的结构化追问。
 
 **桌面与网络**
@@ -332,6 +332,29 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 - `/vibe` — 进入 [Vibe 模式](docs/vibe-mode.md)：以导演身份驱动持久化的 `fast`/`good` worker 会话，自身仅使用 `read` 工具集。
 - `/fresh` — 重置提供商的流状态（过期的提示缓存、卡住的流），不改变本地对话记录。参见 [Session operations](docs/session-operations-export-share-fork-resume.md#fresh)。
+
+### DAG Todo 模式（`--todo-dag`）
+
+通过启动参数启用依赖 DAG 待办调度模式：
+
+```sh
+# 启用 DAG 模式（持久化到 ~/.omp/agent/config.yml 的 todo.dag: true）
+omp --todo-dag
+
+# 后续直接启动 omp 不传参数也会自动延续 DAG 模式
+omp
+
+# 切回默认线性待办模式（持久化为 todo.dag: false）
+omp --no-todo-dag
+```
+
+会话中也可以通过 `/todo dag [on|off|status]` 查看或切换状态。
+
+启用后的行为：
+
+- **前置依赖检查与拓扑调度**：每个任务带有短 ID（`t1`、`t2`、…）与 `deps`。每次完成或修改节点后，`todo` 工具会执行拓扑排序，列出所有前置条件已满足的 **Ready** 任务以及仍被阻塞的 **Blocked** 任务及未完成前置项，由 agent 自主选择并行或串行推进；前置条件未满足时拒绝 `start`/`done`。
+- **带理由的动态增删改**：执行过程中支持 `insert`（通过 `after`/`before` 精确插到两个节点之间并重连依赖边）、`append`、`update`（修改文案/阶段/依赖，带环检测）、`drop` 与 `rm`（自动把被删节点的前置依赖桥接给下游节点）。
+- **防作弊约束**：所有动态图修改均需提供实质性 `reason`；禁止在仍有未完成任务时用 `init` 覆盖整张图、禁止无目标批量 `rm`/`drop`、禁止删改已完成节点，也禁止通过删光/放弃剩余节点来假装完成任务。
 
 ## 六十多个提供商、上千个模型，_只需一次 /model_。
 

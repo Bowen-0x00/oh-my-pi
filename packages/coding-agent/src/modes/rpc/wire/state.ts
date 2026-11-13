@@ -31,10 +31,13 @@ export const stateDefs = {
 	SubagentStatus: "'pending' | 'running' | 'completed' | 'failed' | 'aborted'",
 
 	TodoItem: {
+		"id?": "string",
 		content: "string",
 		status: "TodoStatus",
+		"deps?": "string[]",
 		"details?": "string",
 		"notes?": "string[]",
+		"reason?": "string",
 	},
 	TodoPhase: { name: "string", tasks: "TodoItem[]" },
 	ContextUsage: { tokens: "number.integer", contextWindow: "number.integer", percent: "number" },

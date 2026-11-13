@@ -291,7 +291,7 @@ Core tools live in the same namespace as `read` and `bash`. Pin the active set w
 
 - `task` — fan out subagents in parallel, optionally workspace-isolated.
 - `wait` — block until the next background result, peer message, or steering interrupt; message peers and control jobs via `agent://` and `proc://`.
-- `todo` — ordered mutations over the session todo list with phase tracking.
+- `todo` — ordered mutations over the session todo list with phase tracking (or a dependency DAG with topological scheduling via `--todo-dag`).
 - `ask` — HTML form follow-ups (radios, checkboxes, selects, text) for interactive runs.
 
 **Desktop & web**
@@ -335,6 +335,29 @@ Slash commands shift how a whole session runs:
 
 - `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
 - `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
+
+### DAG Todo Mode (`--todo-dag`)
+
+Opt into dependency-DAG task scheduling on startup:
+
+```sh
+# Enable DAG todo mode (persisted in ~/.omp/agent/config.yml as todo.dag: true)
+omp --todo-dag
+
+# Subsequent launches remember the mode without repeating the flag
+omp
+
+# Switch back to default linear todo mode (persisted as todo.dag: false)
+omp --no-todo-dag
+```
+
+You can also inspect or toggle the mode mid-session via `/todo dag [on|off|status]`.
+
+How it works when enabled:
+
+- **Topological prerequisite scheduling**: Tasks carry short IDs (`t1`, `t2`, ...) and `deps`. After each completion or graph edit, `todo` runs Kahn's topological sort and surfaces **Ready** tasks (all prerequisites settled) alongside **Blocked** tasks and their unmet prerequisites. The agent chooses which ready task(s) to `start` next; `start` and `done` reject blocked tasks.
+- **Justified dynamic edits**: Mid-flight, the agent can `insert` nodes (`after`/`before` splicing edges between existing nodes), `append`, `update` content/phase/dependencies (with cycle detection), `drop`, or `rm` (bridging prerequisites to downstream tasks).
+- **Anti-evasion guardrails**: Graph mutations require a substantive `reason`; re-running `init` over an active DAG, bulk `rm`/`drop`, deleting `completed` tasks, or removing/dropping tasks to fake completion are rejected.
 
 ## Sixty-plus providers, a thousand models, _one /model away_.
 

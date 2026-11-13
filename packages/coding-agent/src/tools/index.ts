@@ -160,6 +160,7 @@ export type {
 export * from "./security-scan";
 export * from "./think";
 export * from "./todo";
+export * from "./todo-dag";
 export * from "./tool-state";
 export * from "./tts";
 export * from "./vibe";
@@ -491,6 +492,10 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Get persisted DAG removed-task count for the active todo cycle. */
+	getTodoDagRemovedCount?: () => number;
+	/** Update persisted DAG removed-task count for the active todo cycle. */
+	setTodoDagRemovedCount?: (count: number) => void;
 	/**
 	 * Replace the todo list from outside the `todo` tool: update the cache and
 	 * record it on the session branch. Direct `todo` calls persist via their

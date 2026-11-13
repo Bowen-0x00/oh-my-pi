@@ -439,6 +439,19 @@ export const cfgTodoEager = register({
 	},
 });
 
+export const cfgTodoDag = register({
+	id: "todo.dag",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "DAG Todo Mode",
+		description:
+			"Track todos as a dependency DAG with topological scheduling, prerequisite blocking, and justified dynamic edits (persisted by --todo-dag / --no-todo-dag)",
+	},
+});
+
 export const cfgTasksTodoClearDelay = register({
 	id: "tasks.todoClearDelay",
 	type: "number",

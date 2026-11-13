@@ -7,6 +7,8 @@ import {
 	resolveTodoMarkdownPath,
 } from "../../tools/todo";
 import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { cfgTodoDag } from "../../tools/settings";
+import { normalizePhasesForDag } from "../../tools/todo-dag";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
@@ -25,6 +27,7 @@ const USAGE = [
 	"  /todo done   [<task|phase>]        Mark task/phase/all completed",
 	"  /todo drop   [<task|phase>]        Mark task/phase/all abandoned",
 	"  /todo rm     [<task|phase>]        Remove task/phase/all",
+	"  /todo dag    [on|off|status]     Toggle or inspect DAG todo mode",
 ].join("\n");
 
 // =============================================================================
@@ -192,6 +195,9 @@ export class TodoCommandController {
 			case "rm":
 				this.#remove(rest);
 				return;
+			case "dag":
+				await this.#handleDagCommand(rest);
+				return;
 			default:
 				this.ctx.showError(`Unknown /todo verb "${verb}".\n${USAGE}`);
 		}
@@ -301,7 +307,8 @@ export class TodoCommandController {
 			status: "pending",
 		});
 
-		this.#commit(next, `/todo append → ${targetPhase.name}`);
+		const committed = this.ctx.settings && cfgTodoDag.get(this.ctx.settings) ? normalizePhasesForDag(next) : next;
+		this.#commit(committed, `/todo append → ${targetPhase.name}`);
 		this.ctx.showStatus(`Appended to ${targetPhase.name}: ${finalContent}`);
 	}
 
@@ -458,6 +465,35 @@ export class TodoCommandController {
 		};
 		this.ctx.agent.appendMessage(message);
 		this.ctx.sessionManager.appendMessage(message);
+	}
+
+	async #handleDagCommand(rest: string): Promise<void> {
+		const settings = this.ctx.settings;
+		if (!settings) {
+			this.ctx.showError("Settings are unavailable in this context.");
+			return;
+		}
+		const arg = rest.trim().toLowerCase();
+		if (!arg || arg === "status") {
+			const enabled = cfgTodoDag.get(settings);
+			this.ctx.showStatus(`Todo DAG mode is ${enabled ? "on" : "off"} (persisted in todo.dag).`);
+			return;
+		}
+		if (arg === "on" || arg === "true" || arg === "enable") {
+			cfgTodoDag.set(settings, true);
+			cfgTodoDag.clearOverride(settings);
+			await settings.flush();
+			this.ctx.showStatus("Todo DAG mode enabled (persisted across restarts).");
+			return;
+		}
+		if (arg === "off" || arg === "false" || arg === "disable") {
+			cfgTodoDag.set(settings, false);
+			cfgTodoDag.clearOverride(settings);
+			await settings.flush();
+			this.ctx.showStatus("Todo DAG mode disabled (default linear mode restored).");
+			return;
+		}
+		this.ctx.showError("Usage: /todo dag [on|off|status]");
 	}
 }
 

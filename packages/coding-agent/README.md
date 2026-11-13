@@ -43,3 +43,11 @@ The agent supports three mutually-exclusive memory backends, selected via the `m
    - `HINDSIGHT_BANK_MISSION`, `HINDSIGHT_DEBUG`
 
 Switching backends mid-session immediately replaces the live backend, memory tools, listeners, and system-prompt context. Existing users with `memories.enabled = true|false` are migrated to `memory.backend = "local"|"off"` exactly once on first launch; afterward, `memory.backend` is the sole runtime selector.
+
+## DAG Todo Mode
+
+Start with `omp --todo-dag` to enable dependency-DAG task tracking (persisted in `todo.dag`, so subsequent `omp` launches without the flag stay in DAG mode until `omp --no-todo-dag` or `/todo dag off` is run).
+
+- **Topological scheduling**: `todo` assigns short IDs (`t1`, `t2`, ...) and computes topological layers after every mutation, listing **Ready** tasks (prerequisites settled) and **Blocked** tasks (unmet prerequisites) so the agent chooses what to run next. `start` and `done` enforce prerequisite readiness.
+- **Dynamic graph mutations**: `insert` (with `after`/`before` edge splicing), `append`, `update` (content, phase, or deps with cycle detection), `drop`, and `rm` (with transitive prerequisite bridging).
+- **Anti-evasion guardrails**: `insert`, `append` (on an active DAG), `update`, `drop`, and `rm` require a substantive `reason`; active-DAG `init` overwrites, bulk `rm`/`drop`, mutating `completed` items, and pruning/dropping tasks to fake completion are rejected.

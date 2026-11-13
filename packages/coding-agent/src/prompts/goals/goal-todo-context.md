@@ -6,7 +6,7 @@ Overall: {{closed}}/{{total}} done, {{open}} open.
 {{#each phases}}
 - {{name}}
 {{#each tasks}}
-  - [{{status}}] {{content}}
+  - {{#if id}}[{{id}}] {{/if}}[{{status}}] {{content}}{{#if depsLabel}} ({{depsLabel}}){{/if}}
 {{/each}}
 {{/each}}
 </todo_context>

@@ -5092,16 +5092,32 @@ export class InteractiveMode implements InteractiveModeContext {
 	#formatTodoLine(todo: TodoItem, prefix: string, matched: boolean): string {
 		const checkbox = theme.checkbox;
 		const marker = formatHudNoteMarker(todo.notes?.length ?? 0);
+		const idTag = todo.id ? `[${todo.id}] ` : "";
+		let depSuffix = "";
+		if (todo.status === "pending" && todo.deps && todo.deps.length > 0) {
+			const closedIds = new Set(
+				this.todoPhases
+					.flatMap(phase => phase.tasks)
+					.filter(task => task.id && isClosedTodo(task))
+					.map(task => task.id!),
+			);
+			const unmet = todo.deps.filter(dep => !closedIds.has(dep));
+			if (unmet.length > 0) depSuffix = theme.fg("dim", ` (needs ${unmet.join(", ")})`);
+		}
 		switch (todo.status) {
 			case "completed":
-				return theme.fg("success", `${prefix}${checkbox.checked} ${chalk.strikethrough(todo.content)}`) + marker;
+				return (
+					theme.fg("success", `${prefix}${checkbox.checked} ${idTag}${chalk.strikethrough(todo.content)}`) + marker
+				);
 			case "in_progress":
-				return theme.fg("accent", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
+				return theme.fg("accent", `${prefix}${checkbox.unchecked} ${idTag}${todo.content}`) + marker;
 			case "abandoned":
-				return theme.fg("error", `${prefix}${checkbox.unchecked} ${chalk.strikethrough(todo.content)}`) + marker;
+				return (
+					theme.fg("error", `${prefix}${checkbox.unchecked} ${idTag}${chalk.strikethrough(todo.content)}`) + marker
+				);
 			default:
-				if (matched) return theme.fg("accent", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
-				return theme.fg("dim", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
+				if (matched) return theme.fg("accent", `${prefix}${checkbox.unchecked} ${idTag}${todo.content}`) + marker;
+				return theme.fg("dim", `${prefix}${checkbox.unchecked} ${idTag}${todo.content}`) + marker + depSuffix;
 		}
 	}
 
@@ -5373,7 +5389,8 @@ export class InteractiveMode implements InteractiveModeContext {
 						: todo.status === "in_progress" || isMatched(todo)
 							? "accent"
 							: "dim";
-			const label: TspSpan[] = [span(todo.content, token)];
+			const displayContent = todo.id ? `[${todo.id}] ${todo.content}` : todo.content;
+			const label: TspSpan[] = [span(displayContent, token)];
 			const notes = todo.notes?.length ?? 0;
 			if (notes > 0) label.push(span(` +${notes}`, "dim em"));
 			return { id, label, icon: done ? "check" : "circle" };
@@ -5426,7 +5443,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				const note = todo.notes?.at(-1);
 				return {
 					id: `${phaseIndex}.${taskIndex}`,
-					text: todo.content,
+					text: todo.id ? `[${todo.id}] ${todo.content}` : todo.content,
 					status:
 						todo.status === "completed"
 							? "done"

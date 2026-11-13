@@ -38,6 +38,13 @@ export const launchHelp = {
 				"Force read-only plan mode at start, auto-approve the plan on the model's first resolve call, then switch to --plan-yolo-into to implement it",
 		}),
 		"plan-yolo-into": Flags.string({ description: 'Target model for plan-yolo execution (default the "smol" role)' }),
+		"todo-dag": Flags.boolean({
+			description:
+				"Enable DAG todo mode (topological prerequisite scheduling and justified dynamic graph edits; remembered across restarts)",
+		}),
+		"no-todo-dag": Flags.boolean({
+			description: "Disable DAG todo mode and return to default linear todo tracking (remembered across restarts)",
+		}),
 		provider: Flags.string({ description: "Provider to use (legacy; prefer --model)" }),
 		"api-key": Flags.string({ description: "API key (defaults to env vars)" }),
 		"system-prompt": Flags.string({ description: "System prompt (default: coding assistant prompt)" }),

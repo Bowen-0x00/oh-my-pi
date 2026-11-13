@@ -65,6 +65,7 @@ import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
 	cfgAsyncEnabled,
 	cfgOutEnabled,
+	cfgTodoDag,
 	cfgToolsIntentTracing,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
@@ -89,6 +90,7 @@ export const cfgSystemPromptInputs = combine({
 	xdevInlineDevices: cfgToolsXdevInlineDevices,
 	vaultEnabled: cfgVaultEnabled,
 	outEnabled: cfgOutEnabled,
+	todoDag: cfgTodoDag,
 	renderMermaid: cfgTuiRenderMermaid,
 	renderSvg: cfgTuiRenderSvg,
 	autoGraph: cfgTuiAutoGraph,

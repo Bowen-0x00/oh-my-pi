@@ -557,8 +557,11 @@ class ModelInfo:
 class TodoItem:
     content: str
     status: TodoStatus
+    id: str | None = None
+    deps: tuple[str, ...] | None = None
     details: str | None = None
     notes: tuple[str, ...] | None = None
+    reason: str | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1951,8 +1954,11 @@ def parse_todo_item(value: object, path: str = "TodoItem") -> TodoItem:
     return TodoItem(
         content=required(payload, "content", decode_str, path),
         status=required(payload, "status", _decode_todo_status, path),
+        id=optional(payload, "id", decode_str, path),
+        deps=optional(payload, "deps", array(decode_str), path),
         details=optional(payload, "details", decode_str, path),
         notes=optional(payload, "notes", array(decode_str), path),
+        reason=optional(payload, "reason", decode_str, path),
     )
 
 

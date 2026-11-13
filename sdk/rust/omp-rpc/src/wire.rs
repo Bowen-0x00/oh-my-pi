@@ -2934,9 +2934,15 @@ pub struct TodoItem {
 	pub content: String,
 	pub status: TodoStatus,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub id: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub deps: Option<Vec<String>>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub details: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub notes: Option<Vec<String>>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

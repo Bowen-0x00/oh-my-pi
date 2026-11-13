@@ -408,8 +408,11 @@ export type SubagentStatus = "pending" | "running" | "completed" | "failed" | "a
 export interface TodoItem {
 	content: string;
 	status: TodoStatus;
+	id?: string;
+	deps?: string[];
 	details?: string;
 	notes?: string[];
+	reason?: string;
 }
 
 export interface TodoPhase {

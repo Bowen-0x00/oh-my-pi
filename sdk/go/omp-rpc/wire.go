@@ -2169,8 +2169,11 @@ func (v *SubagentStatus) UnmarshalJSON(data []byte) error {
 type TodoItem struct {
 	Content string     `json:"content"`
 	Status  TodoStatus `json:"status"`
+	ID      *string    `json:"id,omitempty"`
+	Deps    []string   `json:"deps,omitempty"`
 	Details *string    `json:"details,omitempty"`
 	Notes   []string   `json:"notes,omitempty"`
+	Reason  *string    `json:"reason,omitempty"`
 }
 
 func (v *TodoItem) UnmarshalJSON(data []byte) error {
@@ -2182,8 +2185,11 @@ func (v *TodoItem) decodeFrom(raw map[string]json.RawMessage) error {
 	d := fieldDecoder{raw: raw, owner: "TodoItem"}
 	d.required("content", &out.Content)
 	d.required("status", &out.Status)
+	d.optional("id", &out.ID)
+	d.optional("deps", &out.Deps)
 	d.optional("details", &out.Details)
 	d.optional("notes", &out.Notes)
+	d.optional("reason", &out.Reason)
 	if d.err != nil {
 		return d.err
 	}

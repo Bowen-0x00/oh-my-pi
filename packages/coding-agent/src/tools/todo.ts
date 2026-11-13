@@ -16,6 +16,17 @@ import type { ToolSession } from "../sdk";
 import type { SessionEntry } from "../session/session-entries";
 
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
+import { cfgTodoDag } from "./settings";
+import {
+	analyzeTodoDag,
+	applyDagParams,
+	cloneTodoItem,
+	cloneTodoPhases,
+	formatDagSummary,
+	hasDagMetadata,
+	resolveDagTodoParams,
+	todoDagSchema,
+} from "./todo-dag";
 
 /** Whether an unknown value is a persisted todo phase. */
 export function isTodoPhase(value: unknown): value is TodoPhase {
@@ -88,13 +99,7 @@ function findPhaseByName(phases: TodoPhase[], name: string): TodoPhase | undefin
 	return phases.find(phase => phase.name === name);
 }
 
-function cloneTask(task: TodoItem): TodoItem {
-	return { content: task.content, status: task.status };
-}
-
-function clonePhases(phases: TodoPhase[]): TodoPhase[] {
-	return phases.map(phase => ({ name: phase.name, tasks: phase.tasks.map(cloneTask) }));
-}
+const clonePhases = cloneTodoPhases;
 
 function todoTransitionKey(phase: string, content: string): string {
 	return `${phase}\u0000${content}`;
@@ -138,16 +143,35 @@ function normalizeInProgressTask(phases: TodoPhase[]): void {
 	if (firstPendingTask) firstPendingTask.status = "in_progress";
 }
 
-/** Return the active todo task, preferring an in-progress item over the first pending item. */
+/** Return the active todo task, preferring an in-progress item, then ready pending items, over blocked pending items. */
 export function nextActionableTask(phases: readonly TodoPhase[]): TodoItem | undefined {
+	const isDag = hasDagMetadata(phases);
+	let closedIds: Set<string> | undefined;
+	if (isDag) {
+		closedIds = new Set<string>();
+		for (const phase of phases) {
+			for (const task of phase.tasks) {
+				if (task.id && (task.status === "completed" || task.status === "abandoned")) {
+					closedIds.add(task.id);
+				}
+			}
+		}
+	}
+	let firstReadyPending: TodoItem | undefined;
 	let firstPending: TodoItem | undefined;
 	for (const phase of phases) {
 		for (const task of phase.tasks) {
 			if (task.status === "in_progress") return task;
-			if (!firstPending && task.status === "pending") firstPending = task;
+			if (task.status === "pending") {
+				if (!firstPending) firstPending = task;
+				if (!firstReadyPending) {
+					const depsMet = !closedIds || !task.deps?.some(dep => !closedIds.has(dep));
+					if (depsMet) firstReadyPending = task;
+				}
+			}
 		}
 	}
-	return firstPending;
+	return firstReadyPending ?? firstPending;
 }
 
 export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
@@ -169,7 +193,13 @@ function todoPhasesFingerprint(phases: readonly TodoPhase[]): string {
 	return JSON.stringify(
 		phases.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.map(task => ({ content: task.content, status: task.status })),
+			tasks: phase.tasks.map(task => ({
+				...(task.id !== undefined ? { id: task.id } : {}),
+				content: task.content,
+				status: task.status,
+				...(task.deps !== undefined ? { deps: task.deps } : {}),
+				...(task.reason !== undefined ? { reason: task.reason } : {}),
+			})),
 		})),
 	);
 }
@@ -180,7 +210,9 @@ function withoutBlocked(phases: TodoPhase[]): TodoPhase[] {
 		name: phase.name,
 		tasks: phase.tasks.map(task => {
 			const status: string = task.status;
-			return status === "blocked" ? { content: task.content, status: "pending" } : task;
+			const cloned = cloneTodoItem(task);
+			if (status === "blocked") cloned.status = "pending";
+			return cloned;
 		}),
 	}));
 }
@@ -258,6 +290,30 @@ export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPha
 		if (phases) return clonePhases(phases);
 	}
 	return [];
+}
+
+/** Recover the latest durable DAG removed-task count from the active branch. */
+export function getLatestTodoDagRemovedCountFromEntries(entries: SessionEntry[]): number {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE) {
+			return 0;
+		}
+		if (entry.type !== "message") continue;
+		const message = entry.message as {
+			role?: string;
+			toolName?: string;
+			details?: { op?: unknown; removedCount?: unknown };
+			isError?: boolean;
+		};
+		if (message.role !== "toolResult" || message.toolName !== "todo" || message.isError) continue;
+		if (message.details?.op === "view") continue;
+		if (typeof message.details?.removedCount === "number" && Number.isFinite(message.details.removedCount)) {
+			return message.details.removedCount;
+		}
+		return 0;
+	}
+	return 0;
 }
 
 function resolveTaskOrError(
@@ -527,7 +583,9 @@ export function phasesToMarkdown(phases: TodoPhase[]): string {
 		if (i > 0) out.push("");
 		out.push(`# ${phases[i].name}`);
 		for (const task of phases[i].tasks) {
-			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}`);
+			const idPrefix = task.id ? `[${task.id}] ` : "";
+			const depsSuffix = task.deps && task.deps.length > 0 ? ` (deps: ${task.deps.join(", ")})` : "";
+			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${idPrefix}${task.content}${depsSuffix}`);
 		}
 	}
 	return `${out.join("\n")}\n`;
@@ -579,14 +637,37 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 				errors.push(`Line ${lineNum + 1}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-])`);
 				continue;
 			}
-			currentPhase.tasks.push({ content: taskMatch[2].trim(), status });
+			let rawTaskText = taskMatch[2].trim();
+			let parsedId: string | undefined;
+			let parsedDeps: string[] | undefined;
+			const idMatch = /^\[(t\d+)\]\s+([\s\S]+)$/.exec(rawTaskText);
+			if (idMatch) {
+				parsedId = idMatch[1];
+				rawTaskText = idMatch[2].trim();
+			}
+			const depsMatch = /^([\s\S]+?)\s+\(deps:\s*([^)]+)\)$/.exec(rawTaskText);
+			if (depsMatch) {
+				rawTaskText = depsMatch[1].trim();
+				parsedDeps = depsMatch[2]
+					.split(",")
+					.map(dep => dep.trim())
+					.filter(Boolean);
+			}
+			const parsedTask: TodoItem = { content: rawTaskText, status };
+			if (parsedId !== undefined) {
+				parsedTask.id = parsedId;
+				parsedTask.deps = parsedDeps ?? [];
+			} else if (parsedDeps !== undefined) {
+				parsedTask.deps = parsedDeps;
+			}
+			currentPhase.tasks.push(parsedTask);
 			continue;
 		}
 
 		errors.push(`Line ${lineNum + 1}: unrecognized syntax "${trimmed}"`);
 	}
 
-	normalizeInProgressTask(phases);
+	if (!hasDagMetadata(phases)) normalizeInProgressTask(phases);
 	return { phases, errors };
 }
 
@@ -656,33 +737,52 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 // Tool Class
 // =============================================================================
 
-export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
+const fallbackDagRemovedCount = new WeakMap<ToolSession, number>();
+
+export class TodoTool implements AgentTool<typeof todoSchema | typeof todoDagSchema, TodoToolDetails> {
 	readonly name = "todo";
 	readonly approval = "read" as const;
 	readonly label = "Todo";
 	readonly summary = "Write a structured todo list to track progress within a session";
-	readonly description: string;
-	readonly parameters = todoSchema;
 	readonly concurrency = "exclusive";
 	readonly strict = true;
 	// Raw args reach execute() on schema failure; resolveTodoParams re-validates
 	// and repairs the one recoverable shape (missing `op`, unambiguous payload).
 	readonly lenientArgValidation = true;
-
 	readonly loadMode = "discoverable";
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(todoDescription);
+
+	#cachedDagFlag: boolean | undefined;
+	#cachedDescription = "";
+
+	constructor(private readonly session: ToolSession) {}
+
+	get description(): string {
+		const dag = cfgTodoDag.get(this.session.settings);
+		if (this.#cachedDagFlag !== dag) {
+			this.#cachedDagFlag = dag;
+			this.#cachedDescription = prompt.render(todoDescription, { dag });
+		}
+		return this.#cachedDescription;
+	}
+
+	get parameters(): typeof todoSchema | typeof todoDagSchema {
+		return cfgTodoDag.get(this.session.settings) ? todoDagSchema : todoSchema;
 	}
 
 	async execute(
 		_toolCallId: string,
-		params: TodoParams,
+		params: TodoParams | Record<string, unknown>,
 		_signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		const previousPhases = clonePhases(this.session.getTodoPhases?.() ?? []);
 		const storage = this.session.getSessionFile() ? "session" : "memory";
+
+		if (cfgTodoDag.get(this.session.settings)) {
+			return this.#executeDag(previousPhases, storage, params);
+		}
+
 		const resolved = resolveTodoParams(params, previousPhases.length > 0);
 		if (typeof resolved === "string") {
 			return {
@@ -712,6 +812,73 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 			content: [{ type: "text", text: formatSummary(effective, errors, readOnly) }],
 			details,
 			isError: errors.length > 0 ? true : undefined,
+		};
+	}
+
+	#getRemovedCount(): number {
+		return this.session.getTodoDagRemovedCount?.() ?? fallbackDagRemovedCount.get(this.session) ?? 0;
+	}
+
+	#setRemovedCount(count: number): void {
+		if (this.session.setTodoDagRemovedCount) {
+			this.session.setTodoDagRemovedCount(count);
+		} else {
+			fallbackDagRemovedCount.set(this.session, count);
+		}
+	}
+
+	#executeDag(
+		previousPhases: TodoPhase[],
+		storage: "session" | "memory",
+		params: unknown,
+	): AgentToolResult<TodoToolDetails> {
+		const resolved = resolveDagTodoParams(params, previousPhases.length > 0);
+		if (typeof resolved === "string") {
+			return {
+				content: [{ type: "text", text: resolved }],
+				details: { phases: previousPhases, storage, dag: true },
+				isError: true,
+			};
+		}
+		const op = resolved.op;
+		const readOnly = op === "view";
+		const currentRemovedCount = this.#getRemovedCount();
+		const {
+			phases: updated,
+			errors,
+			removedCount: nextRemovedCount,
+		} = readOnly
+			? { phases: previousPhases, errors: [] as string[], removedCount: currentRemovedCount }
+			: applyDagParams(previousPhases, resolved, currentRemovedCount);
+		const failed = errors.length > 0;
+		const effective = failed ? previousPhases : updated;
+		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
+		if (!readOnly && !failed) {
+			this.session.setTodoPhases?.(updated);
+			this.#setRemovedCount(nextRemovedCount);
+		}
+		const analysis = analyzeTodoDag(effective);
+		const details: TodoToolDetails = {
+			op,
+			phases: effective,
+			storage,
+			dag: true,
+			readyIds: analysis.readyIds,
+			removedCount: failed ? currentRemovedCount : nextRemovedCount,
+		};
+		if (completedTasks.length > 0) details.completedTasks = completedTasks;
+
+		const actionNote =
+			!readOnly &&
+			!failed &&
+			(op === "insert" || op === "append" || op === "update" || op === "drop" || op === "rm") &&
+			resolved.reason
+				? `DAG ${op} applied (reason: ${resolved.reason.trim()}).`
+				: undefined;
+		return {
+			content: [{ type: "text", text: formatDagSummary(effective, errors, readOnly, actionNote) }],
+			details,
+			isError: failed ? true : undefined,
 		};
 	}
 }

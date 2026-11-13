@@ -155,7 +155,7 @@ import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
-import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsApprovalMode } from "./tools/settings";
+import { cfgAsyncPrintWake, cfgLaunchPersist, cfgTodoDag, cfgToolsApprovalMode } from "./tools/settings";
 import { claimTerminal } from "./tools/browser/terminal-owner";
 import {
 	cfgAutocompleteMaxVisible,
@@ -1649,6 +1649,16 @@ export async function buildSessionOptions(
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
 		throw new Error("--no-prewalk cannot be combined with --prewalk or --prewalk-into");
 	}
+	if (parsed.todoDag && parsed.noTodoDag) {
+		throw new CliUsageError("--no-todo-dag cannot be combined with --todo-dag");
+	}
+	if (parsed.todoDag) {
+		cfgTodoDag.set(activeSettings, true);
+		cfgTodoDag.clearOverride(activeSettings);
+	} else if (parsed.noTodoDag) {
+		cfgTodoDag.set(activeSettings, false);
+		cfgTodoDag.clearOverride(activeSettings);
+	}
 	options.suppressAutoPrewalk = parsed.noPrewalk;
 	const explicitPrewalk = parsed.prewalk === true || parsed.prewalkInto !== undefined;
 	const prewalkEnabled = parsed.noPrewalk
@@ -2078,6 +2088,19 @@ export async function runRootCommand(
 		// Apply --external-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.externalThinking) {
 			cfgExternalThinking.override(settingsInstance, true);
+		}
+		// Persist --todo-dag / --no-todo-dag so future launches without the flag keep the chosen mode
+		if (parsedArgs.todoDag && parsedArgs.noTodoDag) {
+			throw new CliUsageError("--no-todo-dag cannot be combined with --todo-dag");
+		}
+		if (parsedArgs.todoDag) {
+			cfgTodoDag.set(settingsInstance, true);
+			cfgTodoDag.clearOverride(settingsInstance);
+			await settingsInstance.flush();
+		} else if (parsedArgs.noTodoDag) {
+			cfgTodoDag.set(settingsInstance, false);
+			cfgTodoDag.clearOverride(settingsInstance);
+			await settingsInstance.flush();
 		}
 		// Apply motion flags (ephemeral, not persisted; they outrank PI_SPINNER_INTERVAL/PI_MAX_FPS/PI_MOTION)
 		if (parsedArgs.spinnerInterval !== undefined) {

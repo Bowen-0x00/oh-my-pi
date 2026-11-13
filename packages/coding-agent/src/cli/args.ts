@@ -44,6 +44,8 @@ export interface Args {
 	prewalkInto?: string;
 	planYolo?: boolean;
 	planYoloInto?: string;
+	todoDag?: boolean;
+	noTodoDag?: boolean;
 	maxTime?: number;
 	warnCost?: number;
 	maxCost?: number;
@@ -382,6 +384,10 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPrewalk = true;
 		} else if (arg === "--plan-yolo") {
 			result.planYolo = true;
+		} else if (arg === "--todo-dag") {
+			result.todoDag = true;
+		} else if (arg === "--no-todo-dag") {
+			result.noTodoDag = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 		} else if (arg === "--print-thoughts") {
@@ -453,6 +459,9 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 
 	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {
 		throw new CliUsageError("--system-prompt and --system-prompt-template cannot be combined");
+	}
+	if (result.todoDag && result.noTodoDag) {
+		throw new CliUsageError("--no-todo-dag cannot be combined with --todo-dag");
 	}
 	return result;
 }

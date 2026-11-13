@@ -6,14 +6,15 @@ import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import { toolWireName } from "../tools/builtin-names";
-import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
+import { getLatestTodoDagRemovedCountFromEntries, getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
+import { analyzeTodoDag, cloneTodoPhases, hasDagMetadata } from "../tools/todo-dag";
 import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
 import { cfgTaskBatch, cfgTaskEager } from "../task/settings";
-import { cfgTodoEager, cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "../tools/settings";
+import { cfgTodoDag, cfgTodoEager, cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "../tools/settings";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
@@ -92,6 +93,7 @@ export interface TodoTrackerHost {
 export class TodoTracker {
 	readonly #host: TodoTrackerHost;
 	#phases: TodoPhase[] = [];
+	#dagRemovedCount = 0;
 	#reminderCount = 0;
 	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
@@ -103,12 +105,25 @@ export class TodoTracker {
 
 	/** Returns a defensive clone of the current todo phases. */
 	get phases(): TodoPhase[] {
-		return this.#clonePhases(this.#phases);
+		return cloneTodoPhases(this.#phases);
+	}
+
+	/** Current DAG removed-task count for anti-evasion accounting. */
+	get dagRemovedCount(): number {
+		return this.#dagRemovedCount;
+	}
+
+	/** Updates the DAG removed-task count for anti-evasion accounting. */
+	setDagRemovedCount(count: number): void {
+		this.#dagRemovedCount = Math.max(0, Math.floor(count));
 	}
 
 	/** Replaces todo phases with a defensive clone. */
 	setPhases(phases: TodoPhase[]): void {
-		this.#phases = this.#clonePhases(phases);
+		this.#phases = cloneTodoPhases(phases);
+		if (phases.length === 0) {
+			this.#dagRemovedCount = 0;
+		}
 		// Every state write lands here — the native tool, a Cursor sync, or a
 		// bridged call — so the nudge budget re-arms on the progress it
 		// rations. Views, failed batches, and unchanged reads never arrive.
@@ -117,12 +132,14 @@ export class TodoTracker {
 
 	/** Rehydrates todo phases from the current transcript branch. */
 	syncFromBranch(): void {
-		this.setPhases(getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranch()));
+		const entries = this.#host.sessionManager.getBranch();
+		this.setPhases(getLatestTodoPhasesFromEntries(entries));
+		this.#dagRemovedCount = getLatestTodoDagRemovedCountFromEntries(entries);
 	}
 
 	/** Returns a defensive clone suitable for snapshots and branch state. */
 	clonePhases(phases: TodoPhase[]): TodoPhase[] {
-		return this.#clonePhases(phases);
+		return cloneTodoPhases(phases);
 	}
 
 	/** Resets per-prompt reminder and mutation budgets. */
@@ -182,7 +199,11 @@ export class TodoTracker {
 		const message: AgentMessage = {
 			role: "custom",
 			customType: EAGER_TODO_PRELUDE_MESSAGE_TYPE,
-			content: prompt.render(eagerTodoPrompt, { ...this.#buildEagerPreludeContext(), forced: mode === "always" }),
+			content: prompt.render(eagerTodoPrompt, {
+				...this.#buildEagerPreludeContext(),
+				forced: mode === "always",
+				dag: cfgTodoDag.get(this.#host.settings),
+			}),
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
@@ -290,8 +311,24 @@ export class TodoTracker {
 			return false;
 		}
 		this.#reminderCount++;
+		const isDag = cfgTodoDag.get(this.#host.settings) || hasDagMetadata(phases);
+		const analysis = isDag ? analyzeTodoDag(phases) : undefined;
 		const todoList = incompleteByPhase
-			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
+			.map(phase => {
+				const lines = phase.tasks.map(task => {
+					const original = phases.find(p => p.name === phase.name)?.tasks.find(t => t.content === task.content);
+					if (!analysis || !original?.id) return `  - ${task.content}`;
+					const unmet = analysis.unmetDepsById.get(original.id) ?? [];
+					const stateTag =
+						original.status === "in_progress"
+							? "in_progress"
+							: unmet.length === 0
+								? "ready"
+								: `blocked by ${unmet.map(d => d.id).join(", ")}`;
+					return `  - [${original.id}] ${task.content} (${stateTag})`;
+				});
+				return `- ${phase.name}\n${lines.join("\n")}`;
+			})
 			.join("\n");
 		const reminder =
 			`<system-reminder>\n` +
@@ -364,13 +401,6 @@ export class TodoTracker {
 			toolRefs: { task: toolWireName(registry, "task"), todo: toolWireName(registry, "todo") },
 			taskBatch: cfgTaskBatch.get(this.#host.settings),
 		};
-	}
-
-	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
-		return phases.map(phase => ({
-			name: phase.name,
-			tasks: phase.tasks.map(task => ({ content: task.content, status: task.status })),
-		}));
 	}
 }
 

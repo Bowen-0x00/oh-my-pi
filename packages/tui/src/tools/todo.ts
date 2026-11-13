@@ -26,14 +26,17 @@ import type { NativeToolView, ToolRenderResult } from "./renderer";
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
 
 /** Operation names accepted by the todo tool and echoed in successful result details. */
-export type TodoOperation = "init" | "start" | "done" | "rm" | "drop" | "append" | "view";
+export type TodoOperation = "init" | "start" | "done" | "rm" | "drop" | "append" | "insert" | "update" | "view";
 
 /** A task displayed within a todo phase. */
 export interface TodoItem {
+	id?: string;
 	content: string;
 	status: TodoStatus;
+	deps?: string[];
 	details?: string;
 	notes?: string[];
+	reason?: string;
 }
 
 /** A named group of todo tasks. */
@@ -55,6 +58,9 @@ export interface TodoToolDetails {
 	phases: TodoPhase[];
 	storage: "session" | "memory";
 	completedTasks?: TodoCompletionTransition[];
+	dag?: boolean;
+	readyIds?: string[];
+	removedCount?: number;
 }
 
 /** Minimum overlap (after normalization) required for a substring match.
@@ -235,9 +241,13 @@ export function selectCollapsedTodos<T extends { status: TodoStatus }>(
 
 type TodoRenderOp = {
 	op?: string;
+	id?: string;
+	ids?: string[];
 	task?: string;
+	content?: string;
 	phase?: string;
 	items?: string[];
+	nodes?: unknown[];
 };
 
 /** New single-op shape `{op,...}`; legacy `{ops:[...]}` still seen in old transcripts. */
@@ -363,6 +373,23 @@ function strikeRevealCount(label: TodoLabel, frame: number | undefined): number 
 	return Math.ceil((count * revealFrame) / TODO_STRIKE_REVEAL_FRAMES);
 }
 
+function buildClosedIdSet(phases: readonly TodoPhase[]): Set<string> {
+	const closed = new Set<string>();
+	for (const phase of phases) {
+		for (const task of phase.tasks) {
+			if (task.id && isClosedTodo(task)) closed.add(task.id);
+		}
+	}
+	return closed;
+}
+
+function formatDagSuffix(item: TodoItem, closedIds: Set<string>, uiTheme: Theme): string {
+	if (!item.deps || item.deps.length === 0 || isClosedTodo(item)) return "";
+	const unmet = item.deps.filter(dep => !closedIds.has(dep));
+	if (unmet.length === 0) return "";
+	return uiTheme.fg("dim", ` (needs ${forDisplay(unmet.join(", "))})`);
+}
+
 function formatTodoLine(
 	item: TodoItem,
 	label: TodoLabel,
@@ -371,25 +398,29 @@ function formatTodoLine(
 	completionKeys: Set<string>,
 	frame: number | undefined,
 	matched = false,
+	closedIds?: Set<string>,
 ): string {
 	const checkbox = uiTheme.checkbox;
 	// `label` is the display-sanitized content (see `forDisplay`); `item.content`
 	// stays raw everywhere else as the identity key and persisted value.
-	const text = label.text;
+	const idTag = item.id ? `[${forDisplay(item.id)}] ` : "";
+	const text = `${idTag}${label.text}`;
+	const depSuffix = closedIds ? formatDagSuffix(item, closedIds, uiTheme) : "";
 	switch (item.status) {
 		case "completed": {
 			const revealCount = completionKeys.has(item.content) ? strikeRevealCount(label, frame) : undefined;
-			const content = revealCount === undefined ? strikethroughText(text) : partialStrikethrough(label, revealCount);
-			return uiTheme.fg("success", `${prefix}${checkbox.checked} ${content}`);
+			const content =
+				revealCount === undefined ? strikethroughText(label.text) : partialStrikethrough(label, revealCount);
+			return uiTheme.fg("success", `${prefix}${checkbox.checked} ${idTag}${content}`);
 		}
 		case "in_progress":
 			return uiTheme.fg("accent", `${prefix}${checkbox.unchecked} ${text}`);
 		case "abandoned":
-			return uiTheme.fg("error", `${prefix}${checkbox.unchecked} ${strikethroughText(text)}`);
+			return uiTheme.fg("error", `${prefix}${checkbox.unchecked} ${idTag}${strikethroughText(label.text)}`);
 		default:
 			// A pending todo lit by a live subagent match renders accent, matching
 			// the sticky HUD's convention (#5873).
-			return uiTheme.fg(matched ? "accent" : "dim", `${prefix}${checkbox.unchecked} ${text}`);
+			return `${uiTheme.fg(matched ? "accent" : "dim", `${prefix}${checkbox.unchecked} ${text}`)}${depSuffix}`;
 	}
 }
 
@@ -424,8 +455,12 @@ function computeTouchedPhases(
 			const named = phases.find(phase => phase.name === op.phase);
 			if (named) touched.add(named.name);
 		}
+		if (typeof op.id === "string" && op.id) {
+			const phase = phases.find(phase => phase.tasks.some(task => task.id === op.id));
+			if (phase) touched.add(phase.name);
+		}
 		if (typeof op.task === "string" && op.task) {
-			const phase = phases.find(phase => phase.tasks.some(task => task.content === op.task));
+			const phase = phases.find(phase => phase.tasks.some(task => task.content === op.task || task.id === op.task));
 			if (phase) touched.add(phase.name);
 		}
 	}
@@ -474,7 +509,8 @@ const CHECKLIST_STATUS: Record<TodoStatus, TspChecklistItem["status"]> = {
 /** Checklist item for one todo; a pending todo an in-flight subagent executes reads as active. */
 function checklistItem(task: TodoItem, id: string, matched = false): TspChecklistItem {
 	const status = task.status === "pending" && matched ? "active" : CHECKLIST_STATUS[task.status];
-	return { id, text: forDisplay(task.content), status };
+	const label = task.id ? `[${forDisplay(task.id)}] ${forDisplay(task.content)}` : forDisplay(task.content);
+	return { id, text: label, status };
 }
 
 /**
@@ -545,14 +581,18 @@ export const todoToolRenderer = {
 				? ["update"]
 				: opsList.map(e => {
 						const parts = [forDisplay(e.op ?? "update")];
-						if (e.task) parts.push(forDisplay(e.task));
-						if (e.phase) parts.push(forDisplay(e.phase));
-						if (Array.isArray(e.items) && e.items.length) {
+						if (typeof e.id === "string" && e.id) parts.push(forDisplay(e.id));
+						else if (Array.isArray(e.ids) && e.ids.length > 0) parts.push(`${e.ids.length} ids`);
+						if (typeof e.task === "string" && e.task) parts.push(forDisplay(e.task));
+						if (typeof e.content === "string" && e.content) parts.push(forDisplay(e.content));
+						if (typeof e.phase === "string" && e.phase) parts.push(forDisplay(e.phase));
+						if (Array.isArray(e.nodes) && e.nodes.length) {
+							parts.push(`${e.nodes.length} node${e.nodes.length === 1 ? "" : "s"}`);
+						} else if (Array.isArray(e.items) && e.items.length) {
 							parts.push(`${e.items.length} item${e.items.length === 1 ? "" : "s"}`);
 						}
 						return parts.join(" ");
 					});
-		// No body worth boxing while the call streams — a lone status line reads
 		// cleaner than an empty frame. The container renders it without chrome.
 		const header = renderStatusLine(
 			{ icon: "pending", spinnerFrame: options?.spinnerFrame, title: "Todo", meta: ops },
@@ -669,6 +709,8 @@ export const todoToolRenderer = {
 				}
 				return matched;
 			};
+			const closedIds =
+				result.details?.dag || allTasks.some(t => t.id !== undefined) ? buildClosedIdSet(phases) : undefined;
 			const bodyLines: string[] = [];
 			for (let p = 0; p < phases.length; p++) {
 				const phase = phases[p];
@@ -695,7 +737,16 @@ export const todoToolRenderer = {
 								expanded,
 								itemType: "todo",
 								renderItem: todo =>
-									formatTodoLine(todo, labelFor(todo), uiTheme, "", completionKeys, spinnerFrame),
+									formatTodoLine(
+										todo,
+										labelFor(todo),
+										uiTheme,
+										"",
+										completionKeys,
+										spinnerFrame,
+										false,
+										closedIds,
+									),
 							},
 							uiTheme,
 						)
@@ -715,6 +766,7 @@ export const todoToolRenderer = {
 											completionKeys,
 											spinnerFrame,
 											isMatched(todo),
+											closedIds,
 										),
 								},
 								uiTheme,
@@ -737,9 +789,14 @@ export const todoToolRenderer = {
 	describeCall(args: TodoRenderArgs): NativeToolView {
 		const ops = normalizeTodoArg(args).map(e => {
 			const parts = [forDisplay(e.op ?? "update")];
-			if (e.task) parts.push(forDisplay(e.task));
-			if (e.phase) parts.push(forDisplay(e.phase));
-			if (Array.isArray(e.items) && e.items.length)
+			if (typeof e.id === "string" && e.id) parts.push(forDisplay(e.id));
+			else if (Array.isArray(e.ids) && e.ids.length > 0) parts.push(`${e.ids.length} ids`);
+			if (typeof e.task === "string" && e.task) parts.push(forDisplay(e.task));
+			if (typeof e.content === "string" && e.content) parts.push(forDisplay(e.content));
+			if (typeof e.phase === "string" && e.phase) parts.push(forDisplay(e.phase));
+			if (Array.isArray(e.nodes) && e.nodes.length)
+				parts.push(`${e.nodes.length} ${pluralize("node", e.nodes.length)}`);
+			else if (Array.isArray(e.items) && e.items.length)
 				parts.push(`${e.items.length} ${pluralize("item", e.items.length)}`);
 			return parts.join(" ");
 		});

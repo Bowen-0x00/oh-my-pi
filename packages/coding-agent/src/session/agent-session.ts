@@ -8537,19 +8537,38 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let total = 0;
 		let closed = 0;
 		let open = 0;
-		const promptPhases = phases.map(phase => ({
-			name: this.#sanitizeGoalTodoText(phase.name),
-			tasks: phase.tasks.map(task => {
-				total++;
-				if (task.status === "completed" || task.status === "abandoned") {
-					closed++;
-				} else {
-					open++;
-				}
-				return { content: this.#sanitizeGoalTodoText(task.content), status: task.status };
-			}),
-		}));
-
+		const promptPhases = phases.map(phase => {
+			const closedIds = new Set(
+				phases
+					.flatMap(p => p.tasks)
+					.filter(t => t.id && (t.status === "completed" || t.status === "abandoned"))
+					.map(t => t.id!),
+			);
+			return {
+				name: this.#sanitizeGoalTodoText(phase.name),
+				tasks: phase.tasks.map(task => {
+					total++;
+					if (task.status === "completed" || task.status === "abandoned") {
+						closed++;
+					} else {
+						open++;
+					}
+					let depsLabel = "";
+					if (task.id && task.deps && task.deps.length > 0 && task.status === "pending") {
+						const unmet = task.deps.filter(dep => !closedIds.has(dep));
+						depsLabel = unmet.length > 0 ? `blocked by ${unmet.join(", ")}` : "ready";
+					} else if (task.id && task.status === "pending") {
+						depsLabel = "ready";
+					}
+					return {
+						id: task.id ? this.#sanitizeGoalTodoText(task.id) : "",
+						content: this.#sanitizeGoalTodoText(task.content),
+						status: task.status,
+						depsLabel,
+					};
+				}),
+			};
+		});
 		return prompt.render(goalTodoContextPrompt, {
 			canCallTodoTool,
 			closed: String(closed),
@@ -11555,6 +11574,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	commitTodoPhases(phases: TodoPhase[]): void {
 		this.#todo.setPhases(phases);
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+	}
+
+	getTodoDagRemovedCount(): number {
+		return this.#todo.dagRemovedCount;
+	}
+
+	setTodoDagRemovedCount(count: number): void {
+		this.#todo.setDagRemovedCount(count);
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */

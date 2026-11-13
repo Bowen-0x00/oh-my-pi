@@ -2725,6 +2725,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
+			getTodoDagRemovedCount: () => session.getTodoDagRemovedCount(),
+			setTodoDagRemovedCount: count => session.setTodoDagRemovedCount(count),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
 			getLastAssistantText: () => session?.getLastAssistantText(),
 			getYieldReportText: toolCallId => resolveYieldReportText(session?.messages ?? [], toolCallId),
