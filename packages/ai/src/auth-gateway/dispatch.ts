@@ -190,7 +190,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	return resolveAfterRotation(rotation, error, () =>
 		storage.keys.getWithCredential(provider, sessionId, {
 			...modelKeyOptions(model, signal),
-			excludedCredentialIds,
+			excludedCredentialIds: rotation.afterSiblingWait ? undefined : excludedCredentialIds,
 		}),
 	);
 }
