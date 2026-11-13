@@ -5,7 +5,12 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
+import {
+	isVertexAnthropicRawPredictUrl,
+	isVertexExpressOpenAIUrl,
+	isVertexRawPredictUrl,
+	resolveVertexEndpointHost,
+} from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
@@ -90,7 +95,8 @@ import { withTransportFetch } from "./utils/transport-fetch";
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
 		model.provider === "google-vertex" &&
-		((model.api === "openai-completions" && isVertexExpressOpenAIUrl(model.baseUrl)) ||
+		((model.api === "openai-completions" &&
+			(isVertexExpressOpenAIUrl(model.baseUrl) || isVertexRawPredictUrl(model.baseUrl))) ||
 			(model.api === "anthropic-messages" && isVertexRawPredictUrl(model.baseUrl)))
 	);
 }
@@ -756,7 +762,9 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
 		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
-		if (isVertexRawPredictUrl(url)) {
+		// Partner publishers other than Anthropic (e.g. Mistral) take OpenAI-shaped
+		// bodies, where `model` is required and `anthropic_version` is rejected.
+		if (isVertexAnthropicRawPredictUrl(url)) {
 			const bodyText = await readVertexRequestBody(rewritten, init);
 			const transformed = transformVertexAnthropicBody(bodyText);
 			return baseFetch(url, {
@@ -816,7 +824,9 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 					.replaceAll("{location}", encodeURIComponent(location))
 					.replaceAll("%7Blocation%7D", encodeURIComponent(location))
 			: url;
-		return rewritten.replace(":streamRawPredict/v1/messages", ":streamRawPredict");
+		return rewritten
+			.replace(":streamRawPredict/v1/messages", ":streamRawPredict")
+			.replace(":streamRawPredict/chat/completions", ":streamRawPredict");
 	};
 
 	if (input instanceof Request) {
